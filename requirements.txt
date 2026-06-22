@@ -1,0 +1,41 @@
+# ── Telegram interfaces ────────────────────────────────────────────────
+python-telegram-bot[ext]==21.10      # control-panel bot (async Application)
+telethon==1.38.1                     # userbot (user account, StringSession)
+
+# ── Scheduling ─────────────────────────────────────────────────────────
+APScheduler==3.11.0                  # AsyncIOScheduler + SQLAlchemyJobStore
+
+# ── Persistence ────────────────────────────────────────────────────────
+SQLAlchemy[asyncio]==2.0.36          # async ORM (2.0 Mapped[] style)
+asyncpg==0.30.0                      # async Postgres driver (domain engine)
+psycopg[binary]==3.2.3               # sync Postgres driver (APScheduler jobstore)
+aiosqlite==0.20.0                    # async sqlite (zero-config local dev)
+alembic==1.14.0                      # DB migrations
+
+# ── Config / validation ────────────────────────────────────────────────
+pydantic==2.10.3
+pydantic-settings==2.7.0
+cryptography==44.0.0                 # Fernet encryption for `secrets` table
+
+# ── AI / voice ─────────────────────────────────────────────────────────
+anthropic==0.42.0                    # Claude — NLU brain (tool-use)
+google-genai==2.8.0                  # Gemini — alternative NLU brain (free tier)
+elevenlabs==1.50.3                   # TTS + voice clone + Scribe STT
+
+# ── Time parsing ───────────────────────────────────────────────────────
+python-dateutil==2.9.0.post0
+dateparser==1.2.0
+
+# ── Google (Milestone 3) ───────────────────────────────────────────────
+google-api-python-client==2.155.0
+google-auth-oauthlib==1.2.1
+
+# ── Misc ───────────────────────────────────────────────────────────────
+httpx==0.28.1
+structlog==24.4.0
+tzdata==2024.2                        # IANA tz (Asia/Tashkent) inside slim image
+
+# ── Dev / test ─────────────────────────────────────────────────────────
+pytest==8.3.4
+pytest-asyncio==0.25.0
+ruff==0.8.4

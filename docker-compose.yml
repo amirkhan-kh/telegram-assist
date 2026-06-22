@@ -1,0 +1,56 @@
+# ─────────────────────────────────────────────────────────────────────────
+# Telegram Assistant — production-ish stack: Postgres + the app.
+# Secrets and the owner id come from .env (env_file). DATABASE_URL is
+# overridden here to point the app at the Postgres service (async URL); the
+# app derives the sync URL (psycopg) internally for APScheduler's jobstore.
+#
+#   docker compose up -d --build
+#   docker compose logs -f app
+# ─────────────────────────────────────────────────────────────────────────
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: assistant
+      POSTGRES_PASSWORD: assistant
+      POSTGRES_DB: assistant
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U assistant -d assistant"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # Secrets + owner id + tokens come from .env (BOT_TOKEN, OWNER_CHAT_ID,
+    # API_ID, API_HASH, TELETHON_SESSION, ANTHROPIC_API_KEY, ELEVENLABS_*, ...).
+    env_file:
+      - .env
+    environment:
+      # Override the DB to Postgres (async). The sync DSN is derived in config.
+      DATABASE_URL: postgresql+asyncpg://assistant:assistant@db:5432/assistant
+      TZ: Asia/Tashkent
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      # Persist generated voice notes (and any local files).
+      - media:/app/data/media
+      # Vertex AI service-account key (the LLM brain when GEMINI_USE_VERTEX=true).
+      # Bind-mounted read-only from the host; the file is gitignored and is NOT
+      # baked into the image, so it must exist on the host next to this file.
+      - ./vertex.json:/app/vertex.json:ro
+    # Launch the assistant. The app ensures its schema on startup
+    # (Base.metadata.create_all), so no separate migration step is needed.
+    command: >
+      sh -c "python -m app.main"
+
+volumes:
+  pgdata:
+  media:

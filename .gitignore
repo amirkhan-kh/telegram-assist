@@ -1,0 +1,42 @@
+# Secrets / env
+.env
+*.session
+*.session-journal
+data/
+!data/.gitkeep
+
+# Google credentials (service account / OAuth client / token) — never commit
+credentials/
+credentials.json
+client_secret*.json
+*service-account*.json
+*service_account*.json
+token.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Media / transient voice files
+*.ogg
+*.mp3
+*.wav
+media/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

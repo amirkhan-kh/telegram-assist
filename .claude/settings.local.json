@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/Users/amirxon/Desktop/telegram-assistant/.venv/bin/python -c \"import anthropic; print\\(anthropic.__version__\\)\")",
+      "Bash(python3 -c \"import anthropic; print\\(anthropic.__version__\\)\")",
+      "Bash(python3 -c \"import pydantic; print\\(pydantic.VERSION\\)\")"
+    ]
+  }
+}

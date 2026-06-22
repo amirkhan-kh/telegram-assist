@@ -1,0 +1,27 @@
+[project]
+name = "telegram-assistant"
+version = "0.1.0"
+description = "Personal Telegram assistant: bot + userbot, reminders, promises, voice (ElevenLabs), Google Meet/Calendar, channel digest"
+requires-python = ">=3.12"
+readme = "README.md"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+ignore = ["B008"]  # function calls in argument defaults (FastAPI/Depends-style is fine)
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true

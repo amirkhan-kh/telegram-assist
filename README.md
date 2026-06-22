@@ -1,8 +1,21 @@
-# Telegram Assistant
+# Joni — Shaxsiy CEO-asistent
 
 Shaxsiy Telegram yordamchisi: **bot** (boshqaruv paneli) + **userbot** (sizning
-hisobingiz), eslatmalar, va'dalar, topshiriqlar, ovozli xabarlar (ElevenLabs),
-Google Meet/Calendar va kanal dayjesti.
+hisobingiz). Egasi bilan oddiy tilda (matn yoki ovoz) gaplashadi va ishlarini
+boshqaradi.
+
+**Asosiy imkoniyatlar:**
+
+- ⏰ **Eslatmalar** — bir martalik va 🔁 **takroriy** («har dushanba», «oy oxirida»).
+- 📅 **Uchrashuvlar** — Google Meet havolasi bilan; **1 kun va 1 soat oldin** eslatadi.
+- 🤝 **Va'dalar** va ✅ **nazoratdagi topshiriqlar** (avtomatik follow-up).
+- 🎂 **Muhim sanalar / tug'ilgan kunlar** — yillik, «X kun oldin» ogohlantirish.
+- 📓 **Qarorlar jurnali** — qabul qilingan qarorlar arxivi.
+- 🌅 **Ertalabki reja** (07:00) va 🌙 **kun yakuni** (21:00) — chiroyli post + tugmalar.
+- ✅ **Bir tugma bilan boshqaruv** — har eslatmada «Bajarildi / Keyinga / Bekor».
+- 📧 **Gmail** (faqat o'qish) — muhim/o'qilmagan xatlar ertalabki rejada va «emaillarim» so'rovida.
+- 📝 **Notion** — qarorlar avtomatik arxivlanadi; «Notion'ga saqla: …» bilan reja/eslatma saqlanadi.
+- ✉️ Ovozli/yozma xabar yuborish, 💰 qarz hisobi, 📰 kanal dayjesti.
 
 Owner (egasi) faqat siz: bot faqat `OWNER_CHAT_ID` chatidan buyruq qabul qiladi.
 Barcha foydalanuvchiga ko'rinadigan matnlar **o'zbekcha** (lotin).
