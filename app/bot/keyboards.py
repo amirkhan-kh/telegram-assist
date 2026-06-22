@@ -129,6 +129,53 @@ def personal_data_menu() -> InlineKeyboardMarkup:
     )
 
 
+# ── debts: mark one settled ("paid") straight from the list ───────────────────
+# Simple ``paid:<id>:<dir>`` payload handled directly in on_callback. ``dir`` (t/i/a)
+# is the list view to re-render after settling (they_owe_me / i_owe_them / all).
+def debt_settle_keyboard(
+    items: list[tuple[int, str]], direction_code: str
+) -> InlineKeyboardMarkup:
+    """A «✅ <name> to'ladi» button per open debt (settles it, refreshes the list)."""
+    rows: list[list[_Btn]] = []
+    for record_id, name in items[:20]:
+        label = name if len(name) <= 22 else name[:21] + "…"
+        rows.append(
+            [_Btn(f"✅ {label}", callback_data=f"paid:{record_id}:{direction_code}")]
+        )
+    return InlineKeyboardMarkup(rows)
+
+
+# ── time clarification: pick the DAY when a command names no day ──────────────
+# Simple ``tday:<code>`` payload handled directly in on_callback. Codes: d0/d1/d2
+# = today/tomorrow/day-after; w0..w6 = next Mon..Sun; "other" = type a date.
+def time_day_keyboard() -> InlineKeyboardMarkup:
+    """Quick day picker shown when a reminder/task gives no day."""
+    b = _Btn
+    return InlineKeyboardMarkup(
+        [
+            [
+                b("Bugun", callback_data="tday:d0"),
+                b("Ertaga", callback_data="tday:d1"),
+                b("Indinga", callback_data="tday:d2"),
+            ],
+            [
+                b("Dushanba", callback_data="tday:w0"),
+                b("Seshanba", callback_data="tday:w1"),
+                b("Chorshanba", callback_data="tday:w2"),
+            ],
+            [
+                b("Payshanba", callback_data="tday:w3"),
+                b("Juma", callback_data="tday:w4"),
+                b("Shanba", callback_data="tday:w5"),
+            ],
+            [
+                b("Yakshanba", callback_data="tday:w6"),
+                b("✍️ Boshqa sana", callback_data="tday:other"),
+            ],
+        ]
+    )
+
+
 # ── outbound channel choice (voice vs text) before a send ─────────────────────
 # Simple ``out:<mode>`` payload handled directly in on_callback, like ``pd:``.
 def outbound_choice_keyboard() -> InlineKeyboardMarkup:
@@ -141,6 +188,27 @@ def outbound_choice_keyboard() -> InlineKeyboardMarkup:
             ]
         ]
     )
+
+
+# ── contact disambiguation (several namesakes -> pick one) ────────────────────
+# Simple ``pick:<person_id>`` payload handled directly in on_callback. The id
+# (not the 1-based index) travels in the payload so the choice is unambiguous.
+def contact_pick_keyboard(person_ids: list[int]) -> InlineKeyboardMarkup:
+    """Numbered buttons (1..N) for choosing among same-name contacts.
+
+    The visible label is the 1-based position (matching the numbered list in the
+    prompt); the payload carries the concrete ``person_id``.
+    """
+    rows: list[list[_Btn]] = []
+    row: list[_Btn] = []
+    for i, pid in enumerate(person_ids, start=1):
+        row.append(_Btn(str(i), callback_data=f"pick:{pid}"))
+        if len(row) == 4:  # up to four numbers per row
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    return InlineKeyboardMarkup(rows)
 
 
 # ── document photos (passport / inspection / insurance) ───────────────────────

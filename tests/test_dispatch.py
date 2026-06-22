@@ -72,6 +72,44 @@ async def test_add_finance_empty_due_does_not_ask_for_time(registry):
     assert "aniqroq" not in result.text.lower()  # no time-clarification prompt
 
 
+async def test_settle_debt_closes_record_and_refreshes_list(registry):
+    """Tapping «✅ <name> to'ladi» settles the debt and re-renders the open list."""
+    from app.services.dispatcher import settle_debt
+
+    # Owe-me debt: Vali owes 50000.
+    await dispatch(
+        registry,
+        RoutedIntent(
+            "add_finance",
+            AddFinance(direction="credit", counterparty_name="Vali", amount=50000, currency="UZS"),
+            {},
+        ),
+        now=_now(),
+    )
+    open_before = await registry.finance_service.list_open(DebtDirection.they_owe_me)
+    assert len(open_before) == 1
+    record_id = open_before[0].id
+
+    # Settle it (dir_code "t" = they_owe_me view).
+    toast, relist = await settle_debt(registry, record_id, "t", now=_now())
+    assert "yopildi" in toast
+    assert "Vali" in toast
+
+    # The record drops out of the open-debts list.
+    open_after = await registry.finance_service.list_open(DebtDirection.they_owe_me)
+    assert open_after == []
+    assert "Vali" not in relist.text
+
+
+async def test_settle_debt_unknown_id_is_graceful(registry):
+    """Settling a missing/already-closed id reports it without crashing."""
+    from app.services.dispatcher import settle_debt
+
+    toast, relist = await settle_debt(registry, 999999, "a", now=_now())
+    assert "topilmadi" in toast.lower() or "yopilgan" in toast.lower()
+    assert relist.text  # still renders a (empty) list view
+
+
 async def test_self_promise_confirms(registry):
     routed = RoutedIntent(
         "create_promise",
@@ -88,16 +126,51 @@ async def test_unknown_intent_is_graceful(registry):
     assert "Tushunmadim" in result.text
 
 
-async def test_ambiguous_time_asks_for_clarification(registry):
-    # A bare hour with no day/clock qualifier must produce a polite question,
-    # not a crash or a generic error.
+async def test_ambiguous_time_asks_day_then_clock_then_creates(registry):
+    """A vague time pins the day via buttons + the clock via text before creating.
+
+    "soat 22:00" (clock known, day missing) -> day keyboard; pick a day -> still
+    no need to ask clock (already known) -> the reminder is created. Nothing is
+    created until the time is fully resolved.
+    """
+    from app.services import dispatcher
+
+    owner_key = registry.settings.owner_chat_id
     routed = RoutedIntent(
         "create_reminder",
-        CreateReminder(text="uchrashuv", when=TimeSpec(raw="9"), pre_alerts_minutes=[]),
+        CreateReminder(text="futbol", when=TimeSpec(raw="soat 22:00"), pre_alerts_minutes=[]),
         {},
     )
-    result = await dispatch(registry, routed, now=_now())
-    assert "aniq emas" in result.text.lower() or "tushunolmadim" in result.text.lower()
+    res = await dispatch(registry, routed, now=_now())
+    # Asks the DAY with a keyboard; no reminder yet.
+    assert "kun" in res.text.lower()
+    assert res.reply_markup is not None
+    assert dispatcher.has_pending_time(owner_key) is False  # awaiting a DAY tap, not text
+
+    # Pick "Ertaga" (tday:d1) -> clock already known (22:00) -> reminder created.
+    done = await dispatcher.resume_time_day(registry, "d1", now=_now())
+    assert done is not None
+    assert "Eslatma qo'yildi" in done.text and "22:00" in done.text
+
+
+async def test_ambiguous_time_day_known_asks_clock_via_text(registry):
+    """"ertaga" (day known, clock missing) -> ask the clock as TYPED text."""
+    from app.services import dispatcher
+
+    owner_key = registry.settings.owner_chat_id
+    routed = RoutedIntent(
+        "create_reminder",
+        CreateReminder(text="yig'ilish", when=TimeSpec(raw="ertaga"), pre_alerts_minutes=[]),
+        {},
+    )
+    res = await dispatch(registry, routed, now=_now())
+    assert "soat" in res.text.lower()
+    assert res.reply_markup is None  # the clock is asked as text, not buttons
+    assert dispatcher.has_pending_time(owner_key)  # awaiting a typed clock
+
+    done = await dispatcher.resume_time_text(registry, "9:30", now=_now())
+    assert done is not None and "Eslatma qo'yildi" in done.text and "09:30" in done.text
+    assert not dispatcher.has_pending_time(owner_key)
 
 
 # ── helper ────────────────────────────────────────────────────────────────────

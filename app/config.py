@@ -45,7 +45,14 @@ class Settings(BaseSettings):
 
     # Gemini (Google). Free path: an AI Studio API key (aistudio.google.com).
     gemini_api_key: str = ""
+    # General/bulk model — cheap, used for high-volume jobs (channel digest,
+    # document OCR) where flash-lite is accurate enough.
     gemini_model: str = "gemini-2.5-flash-lite"
+    # Precision-critical models default to full `flash` (not lite): intent
+    # routing (NLU) and voice transcription (STT) drive every command, so the
+    # extra accuracy is worth the cost. Override per-task via the env if needed.
+    gemini_nlu_model: str = "gemini-2.5-flash"
+    gemini_stt_model: str = "gemini-2.5-flash"
     # Gemini text-to-speech for outbound voice notes (no ElevenLabs needed).
     gemini_tts_model: str = "gemini-2.5-flash-preview-tts"
     # Prebuilt voice. Male: Charon, Puck, Fenrir, Orus, Enceladus, Iapetus.

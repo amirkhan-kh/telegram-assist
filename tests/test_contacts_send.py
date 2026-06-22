@@ -268,6 +268,87 @@ async def test_send_message_unknown_contact_is_graceful(registry):
     assert "topilmadi" in result.text
 
 
+# ── meeting notice: deliver now AND again at the meeting time ─────────────────
+async def test_meeting_notice_sends_now_and_schedules(registry):
+    """'uchrashuv haqida xabar ber' -> message goes out now + at the meeting time."""
+    from app.brain.intents import ScheduleMessage, TimeSpec
+
+    async with registry.session() as session:
+        await person_repo.upsert_telegram_contact(
+            session, telegram_user_id=811, display_name="Doniyor"
+        )
+    before = len(registry.scheduler.get_jobs())
+    routed = RoutedIntent(
+        "schedule_message",
+        ScheduleMessage(
+            recipient_name="Doniyor",
+            content="Ertaga soat 9:35 dagi uchrashuvimizni eslatib qo'yaman.",
+            when=TimeSpec(raw="ertaga soat 9:35"),
+            meeting_notice=True,
+        ),
+        {},
+    )
+    prompt = await dispatch(registry, routed, now=_now())
+    assert "Qanday yuboray" in prompt.text
+
+    result = await complete_outbound(
+        registry, registry.settings.owner_chat_id, SendMode.text
+    )
+    after = len(registry.scheduler.get_jobs())
+    # Confirms both deliveries; the future copy registers exactly one job (the
+    # immediate copy sends inline with no job, so it can't double-fire).
+    assert "hozir yuborildi" in result.text
+    assert "yana yuboriladi" in result.text
+    assert after == before + 1
+
+
+async def test_plain_schedule_message_is_not_a_meeting_notice(registry):
+    """Without meeting_notice the message is only scheduled (no immediate send)."""
+    from app.brain.intents import ScheduleMessage, TimeSpec
+
+    async with registry.session() as session:
+        await person_repo.upsert_telegram_contact(
+            session, telegram_user_id=812, display_name="Olima"
+        )
+    routed = RoutedIntent(
+        "schedule_message",
+        ScheduleMessage(
+            recipient_name="Olima",
+            content="ertaga uchrashamizmi?",
+            when=TimeSpec(raw="ertaga soat 10"),
+        ),
+        {},
+    )
+    await dispatch(registry, routed, now=_now())
+    result = await complete_outbound(
+        registry, registry.settings.owner_chat_id, SendMode.text
+    )
+    assert "rejalashtirildi" in result.text
+    assert "hozir yuborildi" not in result.text
+
+
+def test_schedule_message_tool_exposes_meeting_fields():
+    from app.brain.tools import build_tools
+
+    sched = {t["name"]: t for t in build_tools()}["schedule_message"]
+    props = sched["input_schema"]["properties"]
+    assert "meeting_notice" in props and props["meeting_notice"]["type"] == "boolean"
+    assert "create_meet_link" in props
+    # Anthropic requires every property be listed as required.
+    for field in ("meeting_notice", "create_meet_link"):
+        assert field in sched["input_schema"]["required"]
+
+
+def test_schedule_message_meeting_fields_default_false():
+    from app.brain.intents import ScheduleMessage, TimeSpec
+
+    msg = ScheduleMessage(
+        recipient_name="x", content="y", when=TimeSpec(raw="ertaga soat 9")
+    )
+    assert msg.meeting_notice is False
+    assert msg.create_meet_link is False
+
+
 # ── formality field ───────────────────────────────────────────────────────────
 def test_formality_defaults_neutral_and_accepts_formal():
     assert SendMessage(recipient_name="x", content="y").formality is Formality.neutral

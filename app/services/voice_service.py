@@ -210,12 +210,18 @@ class VoiceService:
         *,
         language_code: str = "uzb",
         mime_type: str = "audio/ogg",
+        hint_names: list[str] | None = None,
     ) -> str:
         """Transcribe ``audio_path`` to text (``""`` on failure).
 
         Prefers ElevenLabs Scribe when configured; otherwise falls back to
         Gemini's multimodal transcription (free) so voice commands work without
         ElevenLabs. Any speaker (male/female) is supported.
+
+        ``hint_names`` is the owner's known contact names; they are fed to the
+        Gemini transcriber so spoken names are spelled exactly as saved
+        (e.g. "Asadbek" never becomes "Asatbek") — the single biggest win for
+        voice-command accuracy.
         """
         client = self._get_client()
         if client is not None:
@@ -227,9 +233,34 @@ class VoiceService:
                     return text
             except Exception as exc:  # noqa: BLE001 - degrade to the Gemini path
                 logger.warning("voice.stt.elevenlabs_failed", error=str(exc))
-        return await self._transcribe_gemini(audio_path, mime_type)
+        return await self._transcribe_gemini(audio_path, mime_type, hint_names)
 
-    async def _transcribe_gemini(self, audio_path: str, mime_type: str) -> str:
+    @staticmethod
+    def _stt_prompt(hint_names: list[str] | None) -> str:
+        """Build the Gemini transcription prompt, biased toward known names."""
+        prompt = (
+            "Bu o'zbekcha audio xabarni so'zma-so'z, aniq MATNGA o'gir. "
+            "Ismlar va atoqli otlarni to'g'ri, to'liq yoz. Lotin alifbosida "
+            "yoz. Faqat aytilgan matnni qaytar — izoh, sarlavha yoki "
+            "qo'shimcha so'z qo'shma."
+        )
+        # Cap the list so the prompt stays small even with many contacts.
+        names = [n.strip() for n in (hint_names or []) if n and n.strip()]
+        if names:
+            joined = ", ".join(names[:60])
+            prompt += (
+                " Quyidagilar foydalanuvchining kontaktlari — agar audioda "
+                "shulardan biriga o'xshash ism eshitilsa, AYNAN shu "
+                f"ko'rinishda yoz: {joined}."
+            )
+        return prompt
+
+    async def _transcribe_gemini(
+        self,
+        audio_path: str,
+        mime_type: str,
+        hint_names: list[str] | None = None,
+    ) -> str:
         """Transcribe audio via Gemini (multimodal). Returns ``""`` on failure."""
         from app.integrations.gemini_client import get_gemini_client
 
@@ -242,13 +273,10 @@ class VoiceService:
 
             data = await asyncio.to_thread(Path(audio_path).read_bytes)
             response = await gemini.aio.models.generate_content(
-                model=self.settings.gemini_model,
+                model=self.settings.gemini_stt_model,
                 contents=[
                     types.Part.from_bytes(data=data, mime_type=mime_type or "audio/ogg"),
-                    "Bu o'zbekcha audio xabarni so'zma-so'z, aniq MATNGA o'gir. "
-                    "Ismlar va atoqli otlarni to'g'ri, to'liq yoz (masalan "
-                    "Asadbek, Dilnoza). Lotin alifbosida yoz. Faqat aytilgan "
-                    "matnni qaytar — izoh, sarlavha yoki qo'shimcha so'z qo'shma.",
+                    self._stt_prompt(hint_names),
                 ],
                 config=types.GenerateContentConfig(temperature=0),
             )

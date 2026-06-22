@@ -71,13 +71,22 @@ class SendMessage(BaseModel):
 
 
 class ScheduleMessage(BaseModel):
-    """Send a message to someone at a later time."""
+    """Send a message to someone at a later time.
+
+    ``meeting_notice`` marks a message that NOTIFIES the recipient about a
+    meeting/appointment scheduled for ``when``: it is delivered immediately AND
+    again at ``when`` (a heads-up now plus a reminder at the time). For an online
+    Meet (the owner said "meet"/"meeting"/"miting"), ``create_meet_link`` asks
+    the assistant to mint a Google Meet link and weave it into the message.
+    """
 
     recipient_name: str
     content: str
     when: TimeSpec
     delivery: DeliveryMode = DeliveryMode.ask
     formality: Formality = Formality.neutral
+    meeting_notice: bool = False
+    create_meet_link: bool = False
 
 
 class RecurrenceSpec(BaseModel):

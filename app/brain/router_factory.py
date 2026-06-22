@@ -23,8 +23,10 @@ def build_router(settings: Settings) -> Any:
     if provider == "gemini":
         from app.brain.gemini_router import GeminiIntentRouter
 
-        logger.info("router.provider", provider="gemini", model=settings.gemini_model)
-        return GeminiIntentRouter(model=settings.gemini_model)
+        logger.info(
+            "router.provider", provider="gemini", model=settings.gemini_nlu_model
+        )
+        return GeminiIntentRouter(model=settings.gemini_nlu_model)
 
     from app.brain.intent_router import IntentRouter
 

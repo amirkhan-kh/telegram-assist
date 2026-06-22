@@ -13,6 +13,7 @@ found locally). It never raises into the caller.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 from app.logging_conf import get_logger
@@ -71,3 +72,43 @@ async def sync_contacts(client: TelegramClient, registry: ServiceRegistry) -> in
         logger.warning("userbot.contacts.sync.error", error=str(exc))
     logger.info("userbot.contacts.sync.done", count=upserted)
     return upserted
+
+
+async def import_phone_contact(
+    client: TelegramClient, phone: str
+) -> dict[str, object] | None:
+    """Import a raw phone number as a Telegram contact -> a minimal user dict.
+
+    Lets the owner message a brand-new number ("+998 90 …ga xabar yubor") that is
+    not yet in their address book. Returns ``None`` when the number is not on
+    Telegram or the import fails — the caller then reports "topilmadi". Adds the
+    number to the owner's Telegram contacts as a side effect (that is how a new
+    number becomes messageable). Best-effort; never raises.
+    """
+    digits = re.sub(r"\D", "", phone or "")
+    if len(digits) < 7:
+        return None
+    normalized = "+" + digits
+    try:
+        from telethon.tl.functions.contacts import ImportContactsRequest
+        from telethon.tl.types import InputPhoneContact
+
+        contact = InputPhoneContact(
+            client_id=0, phone=normalized, first_name=normalized, last_name=""
+        )
+        result = await client(ImportContactsRequest([contact]))
+        users = getattr(result, "users", None) or []
+        if not users:  # number not registered on Telegram / hidden by privacy
+            logger.info("userbot.import_phone.not_on_telegram", phone=normalized)
+            return None
+        user = users[0]
+        logger.info("userbot.import_phone.ok", phone=normalized, user_id=int(user.id))
+        return {
+            "user_id": int(user.id),
+            "name": _display_name(user) or normalized,
+            "username": getattr(user, "username", None),
+            "phone": getattr(user, "phone", None) or digits,
+        }
+    except Exception as exc:  # noqa: BLE001 - import is best-effort, never crash
+        logger.warning("userbot.import_phone.error", phone=normalized, error=str(exc))
+        return None

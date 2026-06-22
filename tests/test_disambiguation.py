@@ -107,3 +107,77 @@ async def test_meeting_disambiguation_then_select_creates_meeting(registry):
     assert "Uchrashuv rejalashtirildi" in res2.text
     assert "Suhbat" in res2.text
     assert not dispatcher.has_pending(owner_key)
+
+
+# ── follow-up correction: typing a new name resumes the SAME paused task ───────
+async def test_correction_with_name_resumes_same_message(registry):
+    """Mid-pick, typing a (corrected) contact name reuses the pending message."""
+    owner_key = await _two_akmals(registry)
+    async with registry.session() as session:
+        await person_repo.upsert_telegram_contact(
+            session, telegram_user_id=520, display_name="Dilshod"
+        )
+    # Ambiguous "Akmal" -> a pending numbered pick.
+    await dispatch(
+        registry,
+        RoutedIntent(
+            "send_message", SendMessage(recipient_name="Akmal", content="salom"), {}
+        ),
+        now=_now(),
+    )
+    assert dispatcher.has_pending(owner_key)
+
+    # The owner re-specifies the contact (a bare name, NLU returns 'unknown').
+    res = await dispatcher.resume_with_correction(
+        registry, RoutedIntent("unknown", None, {}), raw_text="Dilshod", now=_now()
+    )
+    assert res is not None
+    assert "Qanday yuboray" in res.text  # resumed to the channel ask
+    assert "salom" in res.text  # original message body preserved
+    assert "Dilshod" in res.text
+    assert not dispatcher.has_pending(owner_key)
+
+
+async def test_correction_with_dative_name_resolves(registry):
+    """'Dilshodga' (dative) mid-pick still resolves to the saved 'Dilshod'."""
+    owner_key = await _two_akmals(registry)
+    async with registry.session() as session:
+        await person_repo.upsert_telegram_contact(
+            session, telegram_user_id=521, display_name="Dilshod"
+        )
+    await dispatch(
+        registry,
+        RoutedIntent(
+            "send_message", SendMessage(recipient_name="Akmal", content="salom"), {}
+        ),
+        now=_now(),
+    )
+    res = await dispatcher.resume_with_correction(
+        registry, RoutedIntent("unknown", None, {}), raw_text="Dilshod ga", now=_now()
+    )
+    assert res is not None and "Qanday yuboray" in res.text and "Dilshod" in res.text
+    assert not dispatcher.has_pending(owner_key)
+
+
+async def test_new_command_supersedes_pending_pick(registry):
+    """A brand-new, non-contact command mid-pick supersedes the pending pick."""
+    from app.brain.intents import ListContacts
+
+    owner_key = await _two_akmals(registry)
+    await dispatch(
+        registry,
+        RoutedIntent(
+            "send_message", SendMessage(recipient_name="Akmal", content="salom"), {}
+        ),
+        now=_now(),
+    )
+    assert dispatcher.has_pending(owner_key)
+    res = await dispatcher.resume_with_correction(
+        registry,
+        RoutedIntent("list_contacts", ListContacts(query=None), {}),
+        raw_text="kontaktlarim",
+        now=_now(),
+    )
+    assert res is not None
+    assert "Kontaktlaringiz" in res.text  # the new command ran
+    assert not dispatcher.has_pending(owner_key)

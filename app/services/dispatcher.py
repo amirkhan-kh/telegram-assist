@@ -20,8 +20,9 @@ from __future__ import annotations
 
 import contextvars
 import html
+import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
@@ -35,7 +36,10 @@ from app.bot.keyboards import (
     KIND_PROMISE,
     KIND_REMINDER,
     KIND_TASK,
+    contact_pick_keyboard,
+    debt_settle_keyboard,
     outbound_choice_keyboard,
+    time_day_keyboard,
     undo_button,
 )
 from app.brain.contacts import ContactMatch, Disambiguation, resolve_contact
@@ -128,6 +132,9 @@ class _PendingOutbound:
     content: str
     is_owner: bool
     send_at: datetime | None = None
+    # Meeting-notice messages are delivered NOW and again at ``send_at`` (a
+    # heads-up plus a reminder at the meeting time). Set for kind=="schedule".
+    also_send_now: bool = False
 
 
 _PENDING_OUT: dict[int, _PendingOutbound] = {}
@@ -141,6 +148,280 @@ def has_pending_outbound(owner_key: int) -> bool:
 def clear_pending_outbound(owner_key: int) -> None:
     """Drop any message awaiting a voice/text choice (e.g. the owner moved on)."""
     _PENDING_OUT.pop(owner_key, None)
+
+
+# ── pending compose: a contact picked from a "show contacts" list, awaiting the
+#    message body the owner will type/voice next ───────────────────────────────
+@dataclass
+class _PendingCompose:
+    """A contact chosen from a contact-search list; next message becomes its body."""
+
+    recipient_id: int
+    display_name: str
+
+
+_PENDING_COMPOSE: dict[int, _PendingCompose] = {}
+
+
+def has_pending_compose(owner_key: int) -> bool:
+    """True when a picked contact is awaiting the message the owner will send it."""
+    return owner_key in _PENDING_COMPOSE
+
+
+def clear_pending_compose(owner_key: int) -> None:
+    """Drop a pending compose (the owner moved on without writing the message)."""
+    _PENDING_COMPOSE.pop(owner_key, None)
+
+
+def _begin_compose(
+    owner_key: int, person_id: int, display_name: str
+) -> DispatchResult:
+    """Arm a compose: the owner's next message is sent to ``display_name``."""
+    _PENDING_COMPOSE[owner_key] = _PendingCompose(
+        recipient_id=person_id, display_name=display_name
+    )
+    return DispatchResult(
+        f"✍️ <b>{html.escape(display_name, quote=False)}</b>ga xabaringizni "
+        "yozing yoki ovozli yuboring.",
+        parse_mode="HTML",
+    )
+
+
+async def dispatch_compose(
+    registry: ServiceRegistry, content: str, *, now: datetime
+) -> DispatchResult | None:
+    """Send ``content`` to the contact picked earlier from a contact-search list.
+
+    Reuses the normal send path (forcing the already-chosen person so it never
+    re-disambiguates), which then asks «🎙 Ovozli | 📝 Matn» before delivering.
+    Returns ``None`` when there is no pending compose.
+    """
+    from app.brain.intent_router import RoutedIntent
+    from app.brain.intents import SendMessage
+
+    owner_key = registry.settings.owner_chat_id
+    pending = _PENDING_COMPOSE.pop(owner_key, None)
+    if pending is None:
+        return None
+    if not (content or "").strip():
+        return DispatchResult("Xabar matni bo'sh. Nima yuborishni ayting.")
+
+    token = _forced_person_id.set(pending.recipient_id)
+    try:
+        routed = RoutedIntent(
+            "send_message",
+            SendMessage(recipient_name=pending.display_name, content=content),
+            {},
+        )
+        return await dispatch(registry, routed, now=now)
+    finally:
+        _forced_person_id.reset(token)
+
+
+async def settle_debt(
+    registry: ServiceRegistry, record_id: int, dir_code: str, *, now: datetime
+) -> tuple[str, DispatchResult]:
+    """Mark a debt settled (paid) and return ``(toast, refreshed debts list)``.
+
+    Settling is a SOFT close (status=settled, reminder job cancelled) — the record
+    stays for history but drops out of the open-debts list, which is re-rendered in
+    the same view the owner was looking at.
+    """
+    from app.brain.intent_router import RoutedIntent
+    from app.brain.intents import ListFinance
+
+    settled = await registry.finance_service.settle(record_id)
+    name = "Qarz"
+    if settled is not None:
+        async with registry.session() as session:
+            counterparty = await person_repo.get_by_id(
+                session, settled.counterparty_id
+            )
+        name = getattr(counterparty, "display_name", None) or "Qarz"
+    toast = (
+        f"✅ {name} qarzi yopildi"
+        if settled is not None
+        else "Bu yozuv topilmadi yoki allaqachon yopilgan"
+    )
+    direction = {"t": "they_owe_me", "i": "i_owe_them", "a": "all"}.get(
+        dir_code, "all"
+    )
+    relist = await dispatch(
+        registry,
+        RoutedIntent("list_finance", ListFinance(direction=direction), {}),
+        now=now,
+    )
+    return toast, relist
+
+
+# ── pending time: a scheduling intent whose day/clock the owner must pin down ──
+# Intents that REQUIRE a precise day+clock; maps each to its TimeSpec field. An
+# AmbiguousTime from these triggers the interactive day/time clarification.
+_TIME_FIELD = {
+    "create_reminder": "when",
+    "create_promise": "deadline",
+    "assign_task_with_followup": "deadline",
+    "schedule_meeting": "when",
+    "schedule_message": "when",
+}
+
+
+@dataclass
+class _PendingTime:
+    """A scheduling action paused until its day and clock are both pinned down."""
+
+    intent_name: str
+    params: Any
+    field: str
+    day: date | None = None
+    clock: tuple[int, int] | None = None
+    awaiting: str = "day"  # "day" | "clock" | "date_text"
+
+
+_PENDING_TIME: dict[int, _PendingTime] = {}
+
+
+def has_pending_time(owner_key: int) -> bool:
+    """True when a scheduling action is awaiting a typed time/date answer."""
+    pending = _PENDING_TIME.get(owner_key)
+    return pending is not None and pending.awaiting in ("clock", "date_text")
+
+
+def clear_pending_time(owner_key: int) -> None:
+    """Drop a pending time clarification (the owner moved on)."""
+    _PENDING_TIME.pop(owner_key, None)
+
+
+_DAY_PROMPT = "📅 Qaysi kunga belgilab qo'yay? Kunni tanlang:"
+_CLOCK_PROMPT = "🕒 Soat nechada? Vaqtni yozing — masalan «22:00» yoki «9:30»."
+_DATE_PROMPT = "📅 Sanani yozing — masalan «25.06.2026»."
+
+
+def _begin_time_clarify(
+    registry: ServiceRegistry, name: str, params: Any, field: str, exc: AmbiguousTime
+) -> DispatchResult:
+    """Pause a scheduling action and ask for the missing day and/or clock."""
+    owner_key = registry.settings.owner_chat_id
+    pending = _PendingTime(
+        intent_name=name,
+        params=params,
+        field=field,
+        day=getattr(exc, "day_date", None),
+        clock=getattr(exc, "clock", None),
+    )
+    if pending.day is None:
+        pending.awaiting = "day"
+        _PENDING_TIME[owner_key] = pending
+        return DispatchResult(_DAY_PROMPT, reply_markup=time_day_keyboard())
+    # Day already known (only the clock is missing) -> ask for the clock.
+    pending.awaiting = "clock"
+    _PENDING_TIME[owner_key] = pending
+    return DispatchResult(_CLOCK_PROMPT)
+
+
+def _day_from_code(code: str, today: date) -> date | None:
+    """Resolve a ``tday:<code>`` to a concrete date (``None`` for 'other')."""
+    if code.startswith("d") and code[1:].isdigit():
+        return today + timedelta(days=int(code[1:]))
+    if code.startswith("w") and code[1:].isdigit():
+        weekday = int(code[1:]) % 7  # 0=Mon..6=Sun
+        ahead = (weekday - today.weekday()) % 7  # today if it matches
+        return today + timedelta(days=ahead)
+    return None
+
+
+async def resume_time_day(
+    registry: ServiceRegistry, code: str, *, now: datetime
+) -> DispatchResult | None:
+    """Apply a tapped day button, then finalize or ask for the clock/date."""
+    owner_key = registry.settings.owner_chat_id
+    pending = _PENDING_TIME.get(owner_key)
+    if pending is None:
+        return None
+    if code == "other":
+        pending.awaiting = "date_text"
+        return DispatchResult(_DATE_PROMPT)
+    today = now.astimezone(ZoneInfo(registry.settings.user_timezone)).date()
+    chosen = _day_from_code(code, today)
+    if chosen is None:
+        return DispatchResult(_DATE_PROMPT)
+    pending.day = chosen
+    if pending.clock is None:
+        pending.awaiting = "clock"
+        return DispatchResult(_CLOCK_PROMPT)
+    return await _finalize_time(registry, pending, now=now)
+
+
+_CLOCK_TEXT_RE = re.compile(r"^\s*(?:soat\s*)?(\d{1,2})(?::(\d{2}))?\s*$", re.IGNORECASE)
+
+
+def _parse_clock_text(text: str) -> tuple[int, int] | None:
+    """Parse a bare typed time ('22:00', '9:30', 'soat 9') to ``(hour, minute)``."""
+    match = _CLOCK_TEXT_RE.match(text or "")
+    if not match:
+        return None
+    hour = int(match.group(1))
+    minute = int(match.group(2)) if match.group(2) else 0
+    if 0 <= hour <= 23 and 0 <= minute <= 59:
+        return hour, minute
+    return None
+
+
+async def resume_time_text(
+    registry: ServiceRegistry, text: str, *, now: datetime
+) -> DispatchResult | None:
+    """Apply a typed clock (or date) answer to the pending scheduling action."""
+    from app.brain.time_parse import parse_date
+
+    owner_key = registry.settings.owner_chat_id
+    pending = _PENDING_TIME.get(owner_key)
+    if pending is None:
+        return None
+
+    if pending.awaiting == "date_text":
+        parsed = parse_date(text)
+        if parsed is None:
+            return DispatchResult(
+                "📅 Sanani tushunolmadim. KK.OO.YYYY ko'rinishida yozing "
+                "(masalan 25.06.2026)."
+            )
+        pending.day = parsed
+        if pending.clock is None:
+            pending.awaiting = "clock"
+            return DispatchResult(_CLOCK_PROMPT)
+        return await _finalize_time(registry, pending, now=now)
+
+    # awaiting == "clock"
+    clock = _parse_clock_text(text)
+    if clock is None:
+        return DispatchResult(
+            "🕒 Vaqtni tushunolmadim. Masalan «22:00» yoki «9:30» deb yozing."
+        )
+    pending.clock = clock
+    if pending.day is None:  # defensive: day should already be set
+        pending.awaiting = "day"
+        return DispatchResult(_DAY_PROMPT, reply_markup=time_day_keyboard())
+    return await _finalize_time(registry, pending, now=now)
+
+
+async def _finalize_time(
+    registry: ServiceRegistry, pending: _PendingTime, *, now: datetime
+) -> DispatchResult:
+    """Stamp the resolved day+clock onto the intent and run it."""
+    from app.brain.intent_router import RoutedIntent
+    from app.brain.intents import TimeSpec
+
+    owner_key = registry.settings.owner_chat_id
+    clear_pending_time(owner_key)
+    hour, minute = pending.clock or (9, 0)
+    resolved = datetime.combine(pending.day, time(hour, minute))
+    raw = resolved.strftime("%Y-%m-%d %H:%M")
+    setattr(pending.params, pending.field, TimeSpec(raw=raw, kind="absolute"))
+    routed = RoutedIntent(pending.intent_name, pending.params, {})
+    logger.info(
+        "dispatch.resume_time", intent=pending.intent_name, resolved=raw
+    )
+    return await dispatch(registry, routed, now=now)
 
 
 def _outbound_prompt(display_name: str, content: str) -> DispatchResult:
@@ -170,6 +451,15 @@ async def complete_outbound(
         )
 
     if pending.kind == "schedule" and pending.send_at is not None:
+        # Meeting notice: deliver immediately too, so the contact gets a heads-up
+        # now and the very same message again at the meeting time.
+        if pending.also_send_now:
+            await registry.message_service.send_message_now(
+                recipient_id=pending.recipient_id,
+                content=pending.content,
+                delivery=mode,
+                source=Source.nlu,
+            )
         message = await registry.message_service.schedule_message(
             recipient_id=pending.recipient_id,
             content=pending.content,
@@ -177,10 +467,16 @@ async def complete_outbound(
             send_at=pending.send_at,
             source=Source.nlu,
         )
-        text = (
-            f"✉️ {pending.display_name}ga xabar rejalashtirildi.\n"
-            f"🕒 Vaqt: {_local(pending.send_at, registry)}"
-        )
+        if pending.also_send_now:
+            text = (
+                f"✅ {pending.display_name}ga xabar hozir yuborildi.\n"
+                f"🔁 🕒 {_local(pending.send_at, registry)} da yana yuboriladi."
+            )
+        else:
+            text = (
+                f"✉️ {pending.display_name}ga xabar rejalashtirildi.\n"
+                f"🕒 Vaqt: {_local(pending.send_at, registry)}"
+            )
         text += _delivery_note(registry, mode)
         text += _test_mode_note(registry, pending.is_owner)
         return DispatchResult(
@@ -213,19 +509,60 @@ def _match_from_person(person: Any) -> ContactMatch:
         honorific=person.honorific,
         default_send_mode=person.default_send_mode,
         confidence=1.0,
+        phone=person.phone,
+        username=person.telegram_username,
     )
 
 
+# A send-disambiguation (the owner typed a specific recipient) rarely has many
+# namesakes, so a handful is enough. A "show me X's contacts" lookup is different:
+# the owner wants to SEE every namesake/variant and pick, so it shows many more.
+_MAX_PICK = 8
+_MAX_CONTACT_LIST = 50
+
+
+def _looks_like_phone(text: str) -> bool:
+    """True when the recipient string is a phone number rather than a name."""
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    # Only phone characters (digits, spaces, +, -, parentheses) and enough digits
+    # that it cannot be a name with a trailing year ("Akmal 2021").
+    if re.fullmatch(r"[+()\d\s-]+", stripped) is None:
+        return False
+    return len(re.sub(r"\D", "", stripped)) >= 7
+
+
+def _candidate_detail(candidate: ContactMatch) -> str:
+    """A short distinguishing detail so identical names are tellable apart."""
+    if candidate.phone:
+        return f"📞 {candidate.phone}"
+    if candidate.username:
+        return f"@{candidate.username}"
+    return _script_hint(candidate.display_name)
+
+
+def _order_candidates(
+    candidates: list[ContactMatch], *, limit: int = _MAX_PICK
+) -> list[ContactMatch]:
+    """Reachable contacts (have a Telegram id) first, then cap to ``limit``.
+
+    The sort is stable, so any similarity ranking from ``search_by_name`` is
+    preserved within the reachable/unreachable groups.
+    """
+    return sorted(candidates, key=lambda c: c.chat_id is None)[:limit]
+
+
 def _numbered_prompt(name: str, candidates: list[ContactMatch]) -> str:
-    """Build a numbered 'which one?' prompt (shows the alphabet of each name)."""
+    """Build a numbered 'which one?' prompt with a distinguishing detail each."""
     lines = [
-        f"\"{name}\" bo'yicha bir nechta kontakt topildi. "
-        "Qaysi biri? Raqamini yozing:"
+        f"«{name}» bo'yicha {len(candidates)} ta kontakt topildi. "
+        "Qaysi biri? Raqamini tanlang yoki yozing:"
     ]
     for i, candidate in enumerate(candidates, start=1):
-        line = f"{i}. {candidate.display_name} ({_script_hint(candidate.display_name)})"
+        line = f"{i}. {candidate.display_name} — {_candidate_detail(candidate)}"
         if candidate.chat_id is None:
-            line += " — Telegram ID yo'q"
+            line += " ⚠️ Telegram ID yo'q"
         lines.append(line)
     return "\n".join(lines)
 
@@ -265,9 +602,11 @@ async def _resolve_or_pend(
             "Telefoningizdagi kontakt nomini aniqroq ayting."
         )
 
-    # Several matched (e.g. a Latin and a Cyrillic "Akmal"): remember the action
-    # and ask the owner to pick by number; the choice resumes it.
-    candidates = resolved.candidates
+    # Several matched (e.g. two "Akmal"s, or a Latin + a Cyrillic spelling):
+    # remember the action and ask the owner to pick — by tapping a numbered
+    # button or typing the number. The phone/@username on each line tells
+    # identical names apart. The choice resumes the original action.
+    candidates = _order_candidates(resolved.candidates)
     _PENDING[registry.settings.owner_chat_id] = _PendingChoice(
         intent_name=intent_name,
         params=params,
@@ -275,7 +614,10 @@ async def _resolve_or_pend(
         candidate_ids=[c.person_id for c in candidates],
         candidate_labels=[c.display_name for c in candidates],
     )
-    return DispatchResult(_numbered_prompt(name, candidates))
+    return DispatchResult(
+        _numbered_prompt(name, candidates),
+        reply_markup=contact_pick_keyboard([c.person_id for c in candidates]),
+    )
 
 
 async def resume_choice(
@@ -300,6 +642,10 @@ async def resume_choice(
     chosen_label = pending.candidate_labels[selection - 1]
     clear_pending(owner_key)
 
+    # A contact chosen from a "show contacts" list -> start composing a message.
+    if pending.intent_name == "compose_pick":
+        return _begin_compose(owner_key, chosen_id, chosen_label)
+
     token = _forced_person_id.set(chosen_id)
     try:
         routed = RoutedIntent(pending.intent_name, pending.params, {})
@@ -309,6 +655,107 @@ async def resume_choice(
         return await dispatch(registry, routed, now=now)
     finally:
         _forced_person_id.reset(token)
+
+
+async def resume_choice_pid(
+    registry: ServiceRegistry, person_id: int, *, now: datetime
+) -> DispatchResult | None:
+    """Complete a pending disambiguation from a tapped «pick» button.
+
+    The button payload carries the concrete ``person_id`` (not an index), so the
+    pick is unambiguous. Returns ``None`` when nothing is pending, or a stale
+    note when the id is no longer among the offered candidates.
+    """
+    from app.brain.intent_router import RoutedIntent
+
+    owner_key = registry.settings.owner_chat_id
+    pending = _PENDING.get(owner_key)
+    if pending is None:
+        return None
+    if person_id not in pending.candidate_ids:
+        return DispatchResult(
+            "Bu tanlov eskirgan. Iltimos, buyruqni qaytadan ayting."
+        )
+    chosen_label = pending.candidate_labels[pending.candidate_ids.index(person_id)]
+    clear_pending(owner_key)
+
+    # A contact chosen from a "show contacts" list -> start composing a message.
+    if pending.intent_name == "compose_pick":
+        return _begin_compose(owner_key, person_id, chosen_label)
+
+    token = _forced_person_id.set(person_id)
+    try:
+        routed = RoutedIntent(pending.intent_name, pending.params, {})
+        logger.info(
+            "dispatch.resume_choice_pid",
+            intent=pending.intent_name,
+            chosen=chosen_label,
+        )
+        return await dispatch(registry, routed, now=now)
+    finally:
+        _forced_person_id.reset(token)
+
+
+# Contact-bearing fields on the intents whose recipient a follow-up may correct.
+_CONTACT_FIELDS = ("recipient_name", "assignee_name", "notify_target_name")
+
+
+def _recipient_of(routed: RoutedIntent) -> str | None:
+    """The contact name a routed intent points at, if it is a messaging-type one."""
+    params = routed.params
+    if params is None:
+        return None
+    for field in _CONTACT_FIELDS:
+        value = getattr(params, field, None)
+        if value:
+            return str(value)
+    return None
+
+
+async def resume_with_correction(
+    registry: ServiceRegistry,
+    routed: RoutedIntent,
+    *,
+    raw_text: str,
+    now: datetime,
+) -> DispatchResult:
+    """Handle a non-number reply that arrives while a contact pick is pending.
+
+    The owner either (a) re-specifies the contact for the paused action — by
+    typing just a name ("Doniyor aka og'am ga") or "…ga yubor" — in which case
+    we swap that name into the SAME intent and resume it (keeping the original
+    message/time); or (b) issues a brand-new, non-contact command, which simply
+    supersedes the pick. Distinguished by whether the freshly-routed intent
+    names a recipient.
+    """
+    from app.brain.intent_router import RoutedIntent
+
+    owner_key = registry.settings.owner_chat_id
+    pending = _PENDING.get(owner_key)
+    new_name = _recipient_of(routed)
+
+    # A "show contacts" pick list (compose_pick) carries no resumable params, so a
+    # non-number reply here just means a new search/command — route it fresh.
+    if pending is not None and pending.params is None:
+        clear_pending(owner_key)
+        return await dispatch(registry, routed, now=now)
+
+    # A genuinely different command (no recipient, e.g. add_finance, a reminder)
+    # supersedes the pending pick.
+    if pending is None or (routed.name != "unknown" and new_name is None):
+        clear_pending(owner_key)
+        return await dispatch(registry, routed, now=now)
+
+    # Otherwise treat the reply as the corrected contact for the paused action:
+    # a routed recipient if the model found one, else the raw text (a bare name).
+    name = new_name or raw_text.strip()
+    clear_pending(owner_key)
+    setattr(pending.params, pending.field, name)
+    logger.info(
+        "dispatch.resume_with_correction", intent=pending.intent_name, name=name
+    )
+    corrected = RoutedIntent(pending.intent_name, pending.params, {})
+    return await dispatch(registry, corrected, now=now)
 
 
 # ── small helpers ────────────────────────────────────────────────────────────
@@ -333,15 +780,6 @@ def _local(dt: datetime, registry: ServiceRegistry) -> str:
     return to_local_str(dt, registry.settings.user_timezone)
 
 
-def _disambiguation_text(name: str, disamb: Disambiguation) -> str:
-    """Build an Uzbek 'which one did you mean?' prompt from candidates."""
-    names = ", ".join(c.display_name for c in disamb.candidates)
-    return (
-        f"\"{name}\" bo'yicha bir nechta kishi topildi: {names}. "
-        "Iltimos, aniqroq ism ayting."
-    )
-
-
 async def _resolve_recipient(
     registry: ServiceRegistry, name: str
 ) -> ContactMatch | Disambiguation | None:
@@ -354,14 +792,47 @@ async def _resolve_recipient(
     """
     async with registry.session() as session:
         resolved = await resolve_contact(session, name)
-    if resolved is not None or registry.userbot is None:
+    if resolved is not None:
         return resolved
+    if registry.userbot is None:
+        return None
 
+    # Not found yet: pull the owner's address book once (covers a contact added
+    # after startup) and retry.
     from app.userbot.contacts import sync_contacts
 
     await sync_contacts(registry.userbot, registry)
     async with registry.session() as session:
-        return await resolve_contact(session, name)
+        resolved = await resolve_contact(session, name)
+    if resolved is not None:
+        return resolved
+
+    # Still nothing. If the owner addressed a raw phone number (not a saved
+    # contact), import it as a Telegram contact so a brand-new number can be
+    # messaged, then resolve to that freshly created person.
+    if _looks_like_phone(name):
+        return await _import_phone_recipient(registry, name)
+    return None
+
+
+async def _import_phone_recipient(
+    registry: ServiceRegistry, phone: str
+) -> ContactMatch | None:
+    """Import a raw phone as a contact and return a match (``None`` if not on TG)."""
+    from app.userbot.contacts import import_phone_contact
+
+    imported = await import_phone_contact(registry.userbot, phone)
+    if imported is None:
+        return None
+    async with registry.session() as session:
+        person = await person_repo.upsert_telegram_contact(
+            session,
+            telegram_user_id=imported["user_id"],
+            display_name=imported.get("name") or phone,
+            username=imported.get("username"),
+            phone=imported.get("phone") or phone,
+        )
+        return _match_from_person(person)
 
 
 def _delivery_note(registry: ServiceRegistry, delivery: SendMode) -> str:
@@ -429,7 +900,11 @@ async def dispatch(
     try:
         return await handler(registry, params, now)
     except AmbiguousTime as exc:
-        # Turn an unparseable time phrase into a polite clarifying question.
+        # A scheduling intent with a vague time -> ask for the missing day/clock
+        # via buttons/prompt and DON'T create anything until it's pinned down.
+        field = _TIME_FIELD.get(name)
+        if field is not None:
+            return _begin_time_clarify(registry, name, params, field, exc)
         return DispatchResult(str(exc))
     except Exception:  # noqa: BLE001 - never crash the bot loop
         logger.exception("dispatch.failed", intent=name)
@@ -579,14 +1054,22 @@ async def _assign_task_with_followup(
     deadline_dt = parse_uz_time(
         params.deadline, now, registry.settings.user_timezone
     )
+    # Several namesakes -> numbered pick (same UX as send); unknown -> track it
+    # against a lightweight contact so the follow-up still works.
+    resolved = await _resolve_or_pend(
+        registry,
+        params.assignee_name,
+        intent_name="assign_task_with_followup",
+        params=params,
+        field="assignee_name",
+        required=False,
+    )
+    if isinstance(resolved, DispatchResult):
+        return resolved
+
     async with registry.session() as session:
         owner = await person_repo.get_owner(session)
         owner_id = owner.id if owner is not None else None
-        resolved = await resolve_contact(session, params.assignee_name)
-        if isinstance(resolved, Disambiguation):
-            return DispatchResult(
-                _disambiguation_text(params.assignee_name, resolved)
-            )
         if resolved is None:
             # Create a lightweight contact so the task can still be tracked.
             person = await person_repo.create(
@@ -671,22 +1154,61 @@ async def _schedule_message(
     if isinstance(resolved, DispatchResult):
         return resolved
 
+    # A meeting notice is delivered now AND again at the meeting time; for an
+    # online Meet we also mint a Google Meet link and weave it into the message.
+    meeting_notice = bool(getattr(params, "meeting_notice", False))
+    content = params.content
+    if meeting_notice and getattr(params, "create_meet_link", False):
+        content = await _embed_meet_link(registry, content, start_at=send_at)
+
     # Honour an explicit channel if given; else ask. ``complete_outbound`` then
-    # schedules the message for ``send_at`` with the chosen delivery mode.
+    # schedules the message for ``send_at`` (and sends it now for a notice) with
+    # the chosen delivery mode.
     is_owner = resolved.chat_id == registry.settings.owner_chat_id
     owner_key = registry.settings.owner_chat_id
     _PENDING_OUT[owner_key] = _PendingOutbound(
         kind="schedule",
         recipient_id=resolved.person_id,
         display_name=resolved.display_name,
-        content=params.content,
+        content=content,
         is_owner=is_owner,
         send_at=send_at,
+        also_send_now=meeting_notice,
     )
     explicit = _explicit_send_mode(params.delivery)
     if explicit is not None:
         return await complete_outbound(registry, owner_key, explicit)
-    return _outbound_prompt(resolved.display_name, params.content)
+    return _outbound_prompt(resolved.display_name, content)
+
+
+async def _embed_meet_link(
+    registry: ServiceRegistry, content: str, *, start_at: datetime
+) -> str:
+    """Append a freshly minted Google Meet link to ``content`` (best-effort).
+
+    Mirrors the meeting flow: when Google Calendar is connected, create a Meet
+    link for a 30-minute slot at ``start_at`` and add it to the message. On any
+    failure (no Google, auth expired) the message goes out without a link rather
+    than blocking the send.
+    """
+    cal = registry.calendar_service
+    if cal is None or not cal.available():
+        return content
+    try:
+        from app.integrations.google.meet import create_meet_link
+
+        meet_link, _event_id = await create_meet_link(
+            cal,
+            title="Uchrashuv",
+            start=start_at,
+            end=start_at + timedelta(minutes=30),
+        )
+    except Exception:  # noqa: BLE001 - degrade to a linkless message
+        logger.exception("schedule_message.meet_link.failed")
+        return content
+    if not meet_link:
+        return content
+    return f"{content}\n🔗 Meet: {meet_link}"
 
 
 async def _add_finance(
@@ -737,8 +1259,9 @@ async def _add_finance(
     else:
         line = f"Siz {params.counterparty_name}ga {amount_str} {currency} qarzdorsiz."
     text = f"💰 Qarz yozib qo'yildi: {line}"
+    text += f"\n📝 Berilgan sana: {_local(record.incurred_at, registry)}"
     if due_dt is not None:
-        text += f"\n🕒 Muddat: {_local(due_dt, registry)}"
+        text += f"\n🕒 To'lov muddati: {_local(due_dt, registry)}"
     return DispatchResult(text, reply_markup=undo_button(KIND_FINANCE, record.id))
 
 
@@ -948,23 +1471,78 @@ def _money_table(rows: list[tuple[str, str, str, str]]) -> str:
     return "<pre>" + html.escape("\n".join(lines), quote=False) + "</pre>"
 
 
+def _contact_list_prompt(
+    name: str, candidates: list[ContactMatch], *, total: int | None = None
+) -> str:
+    """Numbered 'which contact?' prompt for a name search, framed for messaging."""
+    shown = len(candidates)
+    count = total if total is not None else shown
+    if count == 1:
+        head = f"«{name}» bo'yicha 1 ta kontakt topildi. Kimga xabar yuboramiz?"
+    else:
+        head = (
+            f"«{name}» bo'yicha {count} ta kontakt topildi. "
+            "Kimga xabar yuboramiz? Raqamini tanlang:"
+        )
+    lines = [head]
+    for i, candidate in enumerate(candidates, start=1):
+        line = f"{i}. {candidate.display_name} — {_candidate_detail(candidate)}"
+        if candidate.chat_id is None:
+            line += " ⚠️ Telegram ID yo'q"
+        lines.append(line)
+    if shown < count:
+        lines.append(
+            f"… va yana {count - shown} ta. Aniqroq ism aytsangiz, ro'yxat qisqaradi."
+        )
+    return "\n".join(lines)
+
+
 async def _list_contacts(
     registry: ServiceRegistry, params: Any, now: datetime
 ) -> DispatchResult:
-    """List the owner's saved contacts (optionally filtered by ``query``)."""
+    """List the owner's saved contacts.
+
+    A NAME query becomes a numbered, tappable pick list (search across ALL
+    contacts, honorific/plural-tolerant): choosing one starts composing a
+    message to that contact. With no query, show the read-only full address book.
+    """
+    from app.brain.contacts import clean_contact_query
+
     limit = params.limit if getattr(params, "limit", 0) and params.limit > 0 else 40
+
+    # ── name search -> numbered pick that leads into composing a message ──────
+    if params.query:
+        cleaned = clean_contact_query(params.query)
+        async with registry.session() as session:
+            people = await person_repo.search_by_name(session, cleaned)
+        people = [p for p in people if not p.is_owner]
+        if not people:
+            return DispatchResult(
+                f"«{cleaned}» bo'yicha kontakt topilmadi. "
+                "Ismni boshqacha (to'liqroq yoki qisqaroq) ayting."
+            )
+        total = len(people)
+        candidates = _order_candidates(
+            [_match_from_person(p) for p in people], limit=_MAX_CONTACT_LIST
+        )
+        _PENDING[registry.settings.owner_chat_id] = _PendingChoice(
+            intent_name="compose_pick",
+            params=None,
+            field="",
+            candidate_ids=[c.person_id for c in candidates],
+            candidate_labels=[c.display_name for c in candidates],
+        )
+        return DispatchResult(
+            _contact_list_prompt(cleaned, candidates, total=total),
+            reply_markup=contact_pick_keyboard([c.person_id for c in candidates]),
+        )
+
+    # ── no query: read-only full address book ────────────────────────────────
     async with registry.session() as session:
-        if params.query:
-            people = await person_repo.search_by_name(session, params.query)
-        else:
-            people = await person_repo.list_all(session)
+        people = await person_repo.list_all(session)
     people = [p for p in people if not p.is_owner]
     total = len(people)
     if total == 0:
-        if params.query:
-            return DispatchResult(
-                f"\"{params.query}\" bo'yicha kontakt topilmadi."
-            )
         return DispatchResult(
             "Hozircha kontaktlar yo'q. Userbot ulanganda avtomatik sinxronlanadi."
         )
@@ -1001,12 +1579,15 @@ async def _list_finance(
         wanted.append(("💸 <b>Siz qarzdorsiz</b>", DebtDirection.i_owe_them))
 
     blocks: list[str] = []
+    settle_items: list[tuple[int, str]] = []  # (record_id, name) for the «✅» buttons
+    any_records = False
     async with registry.session() as session:
         for header, direction in wanted:
             records = await finance_repo.list_open(session, direction=direction)
             if not records:
                 blocks.append(f"{header}\n<i>— yo'q</i>")
                 continue
+            any_records = True
             rows: list[tuple[str, str, str, str]] = []
             totals: dict[str, Decimal] = {}
             for record in records:
@@ -1018,6 +1599,7 @@ async def _list_finance(
                 rows.append(
                     (name, _fmt_amount(record.amount), record.currency, due)
                 )
+                settle_items.append((record.id, name))
                 totals[record.currency] = (
                     totals.get(record.currency, Decimal(0)) + record.amount
                 )
@@ -1030,7 +1612,21 @@ async def _list_finance(
 
     if not blocks:
         return DispatchResult("Hozircha qarz yozuvlari yo'q.")
-    return DispatchResult("\n\n".join(blocks), parse_mode="HTML")
+    if not any_records:  # only "— yo'q" placeholders, nothing to settle
+        return DispatchResult("\n\n".join(blocks), parse_mode="HTML")
+
+    text = (
+        "\n\n".join(blocks)
+        + "\n\n✅ To'langanini quyidagi tugma bilan belgilang — ro'yxatdan tushadi."
+    )
+    dir_code = {"they_owe_me": "t", "i_owe_them": "i", "all": "a"}.get(
+        params.direction, "a"
+    )
+    return DispatchResult(
+        text,
+        parse_mode="HTML",
+        reply_markup=debt_settle_keyboard(settle_items, dir_code),
+    )
 
 
 async def _list_agenda(

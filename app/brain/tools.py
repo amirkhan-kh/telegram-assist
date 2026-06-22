@@ -153,8 +153,13 @@ def _schedule_message_tool() -> dict[str, Any]:
         "name": "schedule_message",
         "description": (
             "Kontaktga KELAJAKDA, belgilangan vaqtda xabar yuborish. Egasi "
-            "vaqt aytsa ('ertaga ... yubor') shu tanlanadi. / Send a message "
-            "to a contact at a future time."
+            "vaqt aytsa ('ertaga ... yubor') shu tanlanadi. UCHRASHUV haqida "
+            "xabar berilsa ('X ga uchrashuvimiz/meeting haqida xabar ber') "
+            "meeting_notice=true qiling — xabar HOZIR va belgilangan vaqtda "
+            "(when) ikki marta yuboriladi, va 'content' ichida uchrashuv vaqtini "
+            "albatta yozing. Online meet/meeting/miting bo'lsa "
+            "create_meet_link=true. / Send a message at a future time; set "
+            "meeting_notice for a meeting heads-up (sent now + at the time)."
         ),
         "input_schema": {
             "type": "object",
@@ -165,13 +170,38 @@ def _schedule_message_tool() -> dict[str, Any]:
                 },
                 "content": {
                     "type": "string",
-                    "description": "Tayyor o'zbekcha xabar matni / the message text.",
+                    "description": (
+                        "Tayyor o'zbekcha xabar matni. Uchrashuv haqida bo'lsa "
+                        "vaqtni ham yozing (masalan 'ertaga soat 9:35 dagi "
+                        "uchrashuvimiz'). / the message text."
+                    ),
                 },
                 "when": _time_spec_schema(),
                 "delivery": _DELIVERY_SCHEMA,
                 "formality": _FORMALITY_SCHEMA,
+                "meeting_notice": {
+                    "type": "boolean",
+                    "description": (
+                        "Uchrashuv haqidagi xabarmi — hozir va when vaqtida ikki "
+                        "marta yuboriladi. / meeting heads-up: deliver now + at when."
+                    ),
+                },
+                "create_meet_link": {
+                    "type": "boolean",
+                    "description": (
+                        "Online meet/meeting/miting bo'lsa true — Google Meet "
+                        "havolasi yaratilib xabarga qo'shiladi. / mint a Meet link."
+                    ),
+                },
             },
-            "required": ["recipient_name", "content", "when", "delivery"],
+            "required": [
+                "recipient_name",
+                "content",
+                "when",
+                "delivery",
+                "meeting_notice",
+                "create_meet_link",
+            ],
             "additionalProperties": False,
         },
     }

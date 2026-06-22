@@ -40,12 +40,21 @@ from app.brain.intents import (
 from app.logging_conf import get_logger
 from app.repositories import person_repo
 from app.services.dispatcher import (
-    clear_pending,
+    clear_pending_compose,
     clear_pending_outbound,
+    clear_pending_time,
     complete_outbound,
     dispatch,
+    dispatch_compose,
     has_pending,
+    has_pending_compose,
+    has_pending_time,
     resume_choice,
+    resume_choice_pid,
+    resume_time_day,
+    resume_time_text,
+    resume_with_correction,
+    settle_debt,
 )
 
 if TYPE_CHECKING:
@@ -245,6 +254,101 @@ async def _handle_outbound_callback(registry: ServiceRegistry, query: object) ->
     if message is None:
         return
     # Replace the «Qanday yuboray?» prompt with the outcome (buttons removed).
+    try:
+        await query.edit_message_text(  # type: ignore[attr-defined]
+            result.text,
+            parse_mode=result.parse_mode,
+            reply_markup=result.reply_markup,
+        )
+    except Exception:  # noqa: BLE001 — uneditable/unchanged: post a fresh reply
+        await message.reply_text(
+            result.text,
+            parse_mode=result.parse_mode,
+            reply_markup=result.reply_markup,
+        )
+
+
+async def _handle_tday_callback(registry: ServiceRegistry, query: object) -> None:
+    """Handle a ``tday:<code>`` tap: set the chosen day, then finalize or ask the clock."""
+    data = query.data  # type: ignore[attr-defined]
+    code = data.split(":", 1)[1] if ":" in data else ""
+    await query.answer("⏳ Belgilanmoqda…")  # type: ignore[attr-defined]
+    result = await resume_time_day(registry, code, now=datetime.now(UTC))
+    message = query.message  # type: ignore[attr-defined]
+    if message is None:
+        return
+    if result is None:
+        # Nothing pending anymore — drop the now-stale day buttons.
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 — best-effort cleanup
+            pass
+        return
+    # Replace the day prompt with the next step (clock/date prompt or the result).
+    try:
+        await query.edit_message_text(  # type: ignore[attr-defined]
+            result.text,
+            parse_mode=result.parse_mode,
+            reply_markup=result.reply_markup,
+        )
+    except Exception:  # noqa: BLE001 — uneditable/unchanged: post a fresh reply
+        await message.reply_text(
+            result.text,
+            parse_mode=result.parse_mode,
+            reply_markup=result.reply_markup,
+        )
+
+
+async def _handle_paid_callback(registry: ServiceRegistry, query: object) -> None:
+    """Handle a ``paid:<id>:<dir>`` tap: settle that debt, then refresh the list."""
+    data = query.data  # type: ignore[attr-defined]
+    parts = data.split(":")
+    if len(parts) < 3 or not parts[1].isdigit():
+        await query.answer()  # type: ignore[attr-defined]
+        return
+    record_id, dir_code = int(parts[1]), parts[2]
+    toast, result = await settle_debt(
+        registry, record_id, dir_code, now=datetime.now(UTC)
+    )
+    await query.answer(toast)  # type: ignore[attr-defined]
+    message = query.message  # type: ignore[attr-defined]
+    if message is None:
+        return
+    # Replace the open-debts list with the refreshed view (the settled row is gone).
+    try:
+        await query.edit_message_text(  # type: ignore[attr-defined]
+            result.text,
+            parse_mode=result.parse_mode,
+            reply_markup=result.reply_markup,
+        )
+    except Exception:  # noqa: BLE001 — uneditable/unchanged: post a fresh reply
+        await message.reply_text(
+            result.text,
+            parse_mode=result.parse_mode,
+            reply_markup=result.reply_markup,
+        )
+
+
+async def _handle_pick_callback(registry: ServiceRegistry, query: object) -> None:
+    """Handle a ``pick:<person_id>`` tap: resume the paused action with that contact."""
+    data = query.data  # type: ignore[attr-defined]
+    raw = data.split(":", 1)[1] if ":" in data else ""
+    if not raw.isdigit():
+        await query.answer()  # type: ignore[attr-defined]
+        return
+    await query.answer("⏳ Tanlanmoqda…")  # type: ignore[attr-defined]
+    result = await resume_choice_pid(registry, int(raw), now=datetime.now(UTC))
+    message = query.message  # type: ignore[attr-defined]
+    if message is None:
+        return
+    if result is None:
+        # Nothing pending anymore — just drop the now-stale pick buttons.
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 — best-effort cleanup
+            pass
+        return
+    # Replace the numbered list with the next step (voice/text prompt or result).
     try:
         await query.edit_message_text(  # type: ignore[attr-defined]
             result.text,
@@ -776,6 +880,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     owner_key = registry.settings.owner_chat_id
+    # Tapping any menu button abandons a half-started compose / time prompt.
+    if text in _MENU_LABELS:
+        clear_pending_compose(owner_key)
+        clear_pending_time(owner_key)
     # End-of-day review: deliver the interactive checklist.
     if text == _EOD_MENU_LABEL:
         if registry.briefing_service is not None:
@@ -1101,19 +1209,66 @@ async def _route_and_reply(
     """
     owner_key = registry.settings.owner_chat_id
 
+    # A scheduling action is waiting for the owner to TYPE the time/date (the
+    # day was/will be picked via buttons). Capture this message as that answer.
+    if has_pending_time(owner_key):
+        if _menu_intent(text) is not None or text in _MENU_LABELS:
+            clear_pending_time(owner_key)
+        else:
+            await _respond(
+                message,
+                lambda: resume_time_text(registry, text, now=datetime.now(UTC)),
+                loading="⏳ Belgilanmoqda…",
+            )
+            return
+
+    # A contact was just picked from a "show contacts" list — this message is the
+    # body to send it (unless the owner tapped a menu button, which cancels).
+    if has_pending_compose(owner_key):
+        if _menu_intent(text) is not None or text in _MENU_LABELS:
+            clear_pending_compose(owner_key)
+        else:
+            await _respond(
+                message,
+                lambda: dispatch_compose(registry, text, now=datetime.now(UTC)),
+                loading="⏳ Tayyorlanmoqda…",
+            )
+            return
+
     selection = _parse_selection(text)
-    if selection is not None and has_pending(owner_key):
-        await _respond(
-            message,
-            lambda: resume_choice(registry, selection, now=datetime.now(UTC)),
-            loading="⏳ Tanlanmoqda…",
-        )
+    if has_pending(owner_key):
+        # A bare number answers the "which contact?" prompt directly.
+        if selection is not None:
+            await _respond(
+                message,
+                lambda: resume_choice(registry, selection, now=datetime.now(UTC)),
+                loading="⏳ Tanlanmoqda…",
+            )
+            return
+        # A non-number reply mid-pick is either a corrected contact name (reuse
+        # the paused message/time) or a brand-new command. Route it, then let the
+        # dispatcher decide — so "Doniyor aka og'am ga" resumes the same task
+        # instead of falling through to a puzzled "Tushunmadim".
+        nlu = registry.nlu_service
+
+        async def _pending_or_new() -> object:
+            now = datetime.now(UTC)
+            if nlu is None or not nlu.available():
+                routed = RoutedIntent("unknown", None, {})
+            else:
+                now_iso = now.astimezone(
+                    ZoneInfo(registry.settings.user_timezone)
+                ).isoformat()
+                routed = await nlu.route(text, now_iso=now_iso)
+            return await resume_with_correction(
+                registry, routed, raw_text=text, now=now
+            )
+
+        await _respond(message, _pending_or_new, loading="⏳ Bajarilmoqda…")
         return
-    # A fresh (non-selection) message supersedes any unanswered pick prompt and
-    # any message still waiting for a voice/text channel choice.
-    if selection is None:
-        clear_pending(owner_key)
-        clear_pending_outbound(owner_key)
+
+    # No pending pick: a fresh message supersedes any waiting voice/text choice.
+    clear_pending_outbound(owner_key)
 
     menu = _menu_intent(text)
     if menu is not None:
@@ -1146,16 +1301,39 @@ async def _transcribe_message(
     """Download the voice/audio file and transcribe it to text (``""`` on fail)."""
     try:
         mime = getattr(media, "mime_type", None) or "audio/ogg"
+        hint_names = await _contact_hint_names(registry)
         tg_file = await media.get_file()  # type: ignore[attr-defined]
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "voice.ogg")
             await tg_file.download_to_drive(path)
             return await registry.voice_service.transcribe(  # type: ignore[union-attr]
-                path, mime_type=mime
+                path, mime_type=mime, hint_names=hint_names
             )
     except Exception as exc:  # noqa: BLE001 — degrade gracefully on download/STT error
         logger.warning("bot.transcribe.failed", error=str(exc))
         return ""
+
+
+# Cap on how many contacts are worth feeding to STT as spelling hints. A short
+# list (a few key contacts) sharpens name transcription; a large synced
+# phonebook would just be an arbitrary, noisy slice — so above this we skip the
+# hint entirely and let Gemini transcribe cleanly.
+_STT_HINT_MAX = 100
+
+
+async def _contact_hint_names(registry: ServiceRegistry) -> list[str]:
+    """Owner's saved contact names, fed to STT so spoken names spell correctly."""
+    try:
+        async with registry.session() as session:
+            people = await person_repo.list_all(session)
+        names = [p.display_name for p in people if p.display_name]
+    except Exception as exc:  # noqa: BLE001 — names are a best-effort hint
+        logger.warning("bot.contact_hints.failed", error=str(exc))
+        return []
+    if len(names) > _STT_HINT_MAX:
+        logger.info("bot.contact_hints.skipped", count=len(names))
+        return []
+    return names
 
 
 # ── inline button callbacks ───────────────────────────────────────────────────
@@ -1197,6 +1375,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     if data.startswith("out:"):
         await _handle_outbound_callback(registry, query)
+        return
+    if data.startswith("pick:"):
+        await _handle_pick_callback(registry, query)
+        return
+    if data.startswith("paid:"):
+        await _handle_paid_callback(registry, query)
+        return
+    if data.startswith("tday:"):
+        await _handle_tday_callback(registry, query)
         return
     if data.startswith("doc:"):
         await _handle_doc_callback(registry, query)

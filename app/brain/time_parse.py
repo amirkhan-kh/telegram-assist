@@ -24,13 +24,36 @@ from zoneinfo import ZoneInfo
 
 
 class AmbiguousTime(Exception):
-    """Raised when a phrase does not pin down a single concrete time."""
+    """Raised when a phrase does not pin down a single concrete time.
+
+    Carries WHAT is missing so the caller can ask precisely:
+      * ``missing`` — "day", "clock", or "both".
+      * ``clock`` — the known ``(hour, minute)`` when only the day is missing.
+      * ``day_date`` — the known ``date`` when only the clock is missing.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        missing: str = "both",
+        clock: tuple[int, int] | None = None,
+        day_date: date | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.missing = missing
+        self.clock = clock
+        self.day_date = day_date
 
 
 # Calendar-date entry: "15.03.2019", "15/03/2019", "15-03-2019", "15 03 2019",
 # or ISO "2019-03-15". Used by the personal-data flow (passport/insurance dates).
 _DMY_RE = re.compile(r"^\s*(\d{1,2})[.\-/ ](\d{1,2})[.\-/ ](\d{4})\s*$")
 _YMD_RE = re.compile(r"^\s*(\d{4})[.\-/](\d{1,2})[.\-/](\d{1,2})\s*$")
+
+# A fully-resolved local datetime "YYYY-MM-DD HH:MM", produced by the interactive
+# day+time clarification flow and fed back through ``parse_uz_time`` as-is.
+_ABS_DT_RE = re.compile(r"^\s*(\d{4})-(\d{2})-(\d{2})[ tT](\d{1,2}):(\d{2})\s*$")
 
 
 def parse_date(text: str) -> date | None:
@@ -167,7 +190,16 @@ def parse_uz_time(
         return _to_utc(now_local + timedelta(minutes=rel_minutes), tzinfo)
 
     if not text:
-        raise AmbiguousTime("Vaqt ko'rsatilmagan. Iltimos, vaqtni aniqroq ayting.")
+        raise AmbiguousTime(
+            "Vaqt ko'rsatilmagan. Iltimos, vaqtni aniqroq ayting.", missing="both"
+        )
+
+    # 1b) A fully-resolved "YYYY-MM-DD HH:MM" (from the clarification flow) is taken
+    #     verbatim — both day and clock are already pinned down.
+    iso = _ABS_DT_RE.match(text)
+    if iso:
+        y, mo, d, h, mi = (int(g) for g in iso.groups())
+        return _to_utc(datetime(y, mo, d, h, mi), tzinfo)
 
     # 2) Pure relative offsets (hours / minutes / half hour). These may be
     #    combined ("1 soat 30 minut") and do not depend on day/clock words.
@@ -200,12 +232,15 @@ def parse_uz_time(
     # 3) A clock time (optionally with a day shift) -> absolute wall-clock.
     if clock is not None:
         hour, minute, explicit_minute = clock
-        # A bare "soat 9" (hour 1-12, no minutes, no day) is ambiguous:
-        # it could be today/tomorrow, morning/evening. Demand a qualifier.
-        if not explicit_minute and not has_day and 1 <= hour <= 12:
+        # Clock known but NO day. A bare "soat 9" is always ambiguous (am/pm + day);
+        # and when the caller needs a precise day (reminders/tasks/meetings), even a
+        # definite "soat 22:00" must pin a day rather than silently assume today.
+        bare_ampm = not explicit_minute and 1 <= hour <= 12
+        if not has_day and (require_clock or bare_ampm):
             raise AmbiguousTime(
-                "Vaqt aniq emas: kun va ‘ertalab/kechqurun’ni ayting "
-                "(masalan ‘ertaga soat 9’ yoki ‘soat 21:00’)."
+                "Qaysi kun? Kunni tanlang.",
+                missing="day",
+                clock=(hour, minute),
             )
         base_day = now_local.date() + timedelta(days=total_days)
         candidate = datetime.combine(base_day, time(hour, minute), tzinfo=tzinfo)
@@ -217,11 +252,13 @@ def parse_uz_time(
     # 4) A day shift with no clock. Callers that need a real clock time ask for
     #    one instead of inventing 09:00; all-day callers keep the sane default.
     if has_day and not has_relative:
+        base_day = now_local.date() + timedelta(days=total_days)
         if require_clock:
             raise AmbiguousTime(
-                "Soat nechada? Masalan: «ertaga soat 15:00» yoki «bugun 18:30»."
+                "Soat nechada? Masalan: «15:00» yoki «9:30» deb yozing.",
+                missing="clock",
+                day_date=base_day,
             )
-        base_day = now_local.date() + timedelta(days=total_days)
         candidate = datetime.combine(base_day, time(9, 0), tzinfo=tzinfo)
         return _to_utc(candidate, tzinfo)
 
@@ -230,14 +267,17 @@ def parse_uz_time(
         result = now_local + delta + timedelta(days=total_days)
         return _to_utc(result, tzinfo)
 
-    # 6) A bare hour 1-12 with nothing else is ambiguous.
-    if _BARE_HOUR_RE.search(text):
+    # 6) A bare hour with nothing else: the clock is known, the day is not.
+    bare = _BARE_HOUR_RE.search(text)
+    if bare and 0 <= int(bare.group(1)) <= 23:
         raise AmbiguousTime(
-            "Vaqt aniq emas: kun va ‘ertalab/kechqurun’ni ayting "
-            "(masalan ‘ertaga soat 9’)."
+            "Qaysi kun? Kunni tanlang.",
+            missing="day",
+            clock=(int(bare.group(1)), 0),
         )
 
     raise AmbiguousTime(
         "Vaqtni tushunolmadim. Iltimos, qaytadan, aniqroq ayting "
-        "(masalan ‘10 minutda’ yoki ‘ertaga soat 9’)."
+        "(masalan ‘10 minutda’ yoki ‘ertaga soat 9’).",
+        missing="both",
     )

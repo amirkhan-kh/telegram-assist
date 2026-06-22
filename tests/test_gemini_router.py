@@ -1,24 +1,23 @@
-"""Gemini router tests — provider selection, schema build, parsing (no network)."""
+"""Gemini router tests — provider selection + structured-output parsing (no network)."""
 
 from __future__ import annotations
 
 import pytest
 
-from app.brain.gemini_router import GeminiIntentRouter, _strip_unsupported
+from app.brain.gemini_router import GeminiIntentRouter
 from app.brain.intent_router import IntentRouter
+from app.brain.intents import CreateReminder, SendMessage, TimeSpec
+from app.brain.nlu_schema import NLUResult
 from app.brain.router_factory import build_router
 
 
-# ── fakes: a Gemini client whose generate_content returns canned function calls ─
-class _FakeCall:
-    def __init__(self, name: str, args: dict) -> None:
-        self.name = name
-        self.args = args
-
-
+# ── fakes: a Gemini client whose generate_content returns a canned response ────
 class _FakeResponse:
-    def __init__(self, calls: list) -> None:
-        self.function_calls = calls
+    """Mimics a google-genai response: ``.parsed`` (SDK-validated) + ``.text``."""
+
+    def __init__(self, parsed: NLUResult | None = None, text: str | None = None) -> None:
+        self.parsed = parsed
+        self.text = text
 
 
 class _FakeModels:
@@ -34,7 +33,15 @@ class _FakeClient:
         self.aio = type("Aio", (), {"models": _FakeModels(response)})()
 
 
-_WHEN = {"raw": "10 minutda", "kind": "relative", "rel_minutes": 10, "clock_hint": None}
+_WHEN = TimeSpec(raw="10 minutda", kind="relative", rel_minutes=10)
+
+
+def _reminder_result() -> NLUResult:
+    return NLUResult(
+        reasoning="owner reminder",
+        intent="create_reminder",
+        create_reminder=CreateReminder(text="suv ich", when=_WHEN, pre_alerts_minutes=[]),
+    )
 
 
 def test_build_router_selects_provider(settings):
@@ -44,53 +51,62 @@ def test_build_router_selects_provider(settings):
     assert isinstance(anthropic, IntentRouter)
 
 
-def test_strip_unsupported_removes_additional_properties():
-    schema = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {"x": {"type": "string", "additionalProperties": False}},
-    }
-    out = _strip_unsupported(schema)
-    assert "additionalProperties" not in out
-    assert "additionalProperties" not in out["properties"]["x"]
-
-
-def test_tools_build_as_function_declarations():
-    # No client needed to build the tool declarations from the shared schemas.
-    router = GeminiIntentRouter(client=_FakeClient(_FakeResponse([])))
-    tool = router._tools()
-    assert len(tool.function_declarations) == 22
-
-
-async def test_route_maps_function_call_to_intent():
-    call = _FakeCall(
-        "create_reminder",
-        {"text": "suv ich", "when": _WHEN, "pre_alerts_minutes": []},
-    )
-    router = GeminiIntentRouter(client=_FakeClient(_FakeResponse([call])))
+async def test_route_maps_structured_result_to_intent():
+    router = GeminiIntentRouter(client=_FakeClient(_FakeResponse(parsed=_reminder_result())))
     routed = await router.route("suv ichishni esla", now_iso="2026-06-18T13:00:00+05:00")
     assert routed.name == "create_reminder"
     assert routed.params.text == "suv ich"
 
 
-async def test_route_unknown_when_no_function_call():
-    router = GeminiIntentRouter(client=_FakeClient(_FakeResponse([])))
+async def test_route_parses_from_json_text_when_no_parsed():
+    # An SDK/fake that only fills ``.text`` (raw JSON) still routes correctly.
+    response = _FakeResponse(parsed=None, text=_reminder_result().model_dump_json())
+    router = GeminiIntentRouter(client=_FakeClient(response))
+    routed = await router.route("suv ich", now_iso="2026-06-18T13:00:00+05:00")
+    assert routed.name == "create_reminder"
+    assert routed.params.text == "suv ich"
+
+
+async def test_route_unknown_intent_returns_unknown():
+    result = NLUResult(reasoning="greeting, no intent", intent="unknown")
+    router = GeminiIntentRouter(client=_FakeClient(_FakeResponse(parsed=result)))
     routed = await router.route("salom", now_iso="2026-06-18T13:00:00+05:00")
     assert routed.name == "unknown"
     assert routed.params is None
 
 
-async def test_route_invalid_args_become_unknown():
-    # Missing required 'text' -> pydantic validation fails -> unknown, no crash.
-    call = _FakeCall("create_reminder", {"when": _WHEN})
-    router = GeminiIntentRouter(client=_FakeClient(_FakeResponse([call])))
+async def test_route_adopts_filled_subobject_on_intent_mismatch():
+    # Model named create_reminder but actually filled send_message -> adopt it.
+    result = NLUResult(
+        reasoning="mismatch",
+        intent="create_reminder",
+        create_reminder=None,
+        send_message=SendMessage(recipient_name="Akmal", content="salom"),
+    )
+    router = GeminiIntentRouter(client=_FakeClient(_FakeResponse(parsed=result)))
+    routed = await router.route("Akmalga salom yoz", now_iso="2026-06-18T13:00:00+05:00")
+    assert routed.name == "send_message"
+    assert routed.params.recipient_name == "Akmal"
+
+
+async def test_route_invalid_json_becomes_unknown():
+    # Sub-object missing a required field -> validation fails -> unknown, no crash.
+    bad = '{"reasoning":"x","intent":"create_reminder","create_reminder":{"when":null}}'
+    router = GeminiIntentRouter(client=_FakeClient(_FakeResponse(parsed=None, text=bad)))
     routed = await router.route("...", now_iso="2026-06-18T13:00:00+05:00")
     assert routed.name == "unknown"
 
 
+async def test_route_no_result_returns_unknown():
+    router = GeminiIntentRouter(client=_FakeClient(_FakeResponse(parsed=None, text=None)))
+    routed = await router.route("...", now_iso="2026-06-18T13:00:00+05:00")
+    assert routed.name == "unknown"
+    assert routed.params is None
+
+
 async def test_route_requires_client():
     # No client and no Gemini key configured in tests -> clear RuntimeError.
-    router = GeminiIntentRouter(model="gemini-2.0-flash")
+    router = GeminiIntentRouter(model="gemini-2.5-flash")
     assert router.client is None
     with pytest.raises(RuntimeError):
         await router.route("salom", now_iso="2026-06-18T13:00:00+05:00")
@@ -123,10 +139,9 @@ async def test_route_retries_transient_server_error(monkeypatch):
     monkeypatch.setattr(gr.asyncio, "sleep", _no_sleep)  # instant backoff
 
     counter = {"n": 0}
-    good = _FakeResponse(
-        [_FakeCall("create_reminder", {"text": "x", "when": _WHEN, "pre_alerts_minutes": []})]
+    router = GeminiIntentRouter(
+        client=_flaky_client(2, _FakeResponse(parsed=_reminder_result()), counter)
     )
-    router = GeminiIntentRouter(client=_flaky_client(2, good, counter))
     routed = await router.route("...", now_iso="2026-06-18T13:00:00+05:00")
 
     assert counter["n"] == 3  # two failures, then success
@@ -144,7 +159,7 @@ async def test_route_raises_after_retries_exhausted(monkeypatch):
     monkeypatch.setattr(gr.asyncio, "sleep", _no_sleep)
 
     counter = {"n": 0}
-    router = GeminiIntentRouter(client=_flaky_client(99, _FakeResponse([]), counter))
+    router = GeminiIntentRouter(client=_flaky_client(99, _FakeResponse(), counter))
     with pytest.raises(genai_errors.ServerError):
         await router.route("...", now_iso="2026-06-18T13:00:00+05:00")
     assert counter["n"] == 3  # exactly _RETRY_ATTEMPTS tries
