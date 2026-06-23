@@ -183,6 +183,20 @@ def clean_contact_query(raw: str) -> str:
     return cleaned or raw.strip()
 
 
+def _name_subset_of(person: object, query: str) -> bool:
+    """True when EVERY token of the contact's name appears in ``query``.
+
+    Distinguishes a legitimate short-name hit ("Akmal Karimov" said, contact
+    saved as "Akmal" — subset, accept) from a wrong namesake ("Bekzod Abdulvahob"
+    said, only "Bekzod" matched a different "Bekzod Dust" — "dust" is NOT in the
+    query, reject). Script-agnostic via ``normalize_name``.
+    """
+    q_tokens = {normalize_name(t) for t in (query or "").split()} - {""}
+    p_tokens = [normalize_name(t) for t in (getattr(person, "display_name", "") or "").split()]
+    p_tokens = [t for t in p_tokens if t]
+    return bool(p_tokens) and all(t in q_tokens for t in p_tokens)
+
+
 def _to_match(person: object, confidence: float) -> ContactMatch:
     """Build a :class:`ContactMatch` from a ``Person`` ORM row."""
 
@@ -215,9 +229,11 @@ async def resolve_contact(
     # "Akmal aka" -> "Akmal": saved contacts rarely carry the honorific.
     needle = _strip_honorifics(raw)
     people = await person_repo.search_by_name(session, needle)
+    used_first_token_fallback = False
     if not people and " " in needle:
         # Fall back to the first name token (owner may have said a full name
         # while the contact is saved under just one part).
+        used_first_token_fallback = True
         people = await person_repo.search_by_name(session, needle.split()[0])
     if not people:
         return None
@@ -240,6 +256,13 @@ async def resolve_contact(
         return Disambiguation([_to_match(p, 1.0) for p in exact])
 
     if len(people) == 1:
+        # A single hit from a first-token fallback is risky: the owner named
+        # MORE words that didn't match the full name. Trust it only when the
+        # candidate's whole name is contained in what the owner said; otherwise
+        # it's a different namesake ("Bekzod Abdulvahob" must NOT become "Bekzod
+        # Dust") — return not-found so the owner is asked instead of mis-sent to.
+        if used_first_token_fallback and not _name_subset_of(people[0], needle):
+            return None
         return _to_match(people[0], 0.9)
 
     return Disambiguation([_to_match(p, 0.6) for p in people])
