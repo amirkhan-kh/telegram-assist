@@ -130,9 +130,28 @@ class EventService:
             eid = event.id
 
         await self._schedule_alerts(eid, occurrence, days_before)
+        # Best-effort: also surface this date on the owner's Google Calendar so it
+        # shows up under the Calendar view (yearly dates recur via an RRULE).
+        await self._sync_to_calendar(title, occurrence, yearly)
         logger.info("event.added", event_id=eid, date=occurrence.isoformat())
         async with self.registry.session() as session:
             return await event_repo.get(session, eid)  # type: ignore[return-value]
+
+    async def _sync_to_calendar(
+        self, title: str, occurrence: date, yearly: bool
+    ) -> None:
+        """Mirror an important date onto Google Calendar as an all-day event."""
+        from app.integrations.google.calendar import add_calendar_event
+
+        start = datetime.combine(occurrence, time(0, 0), tzinfo=self._tz)
+        recurrence = ["RRULE:FREQ=YEARLY"] if yearly else None
+        await add_calendar_event(
+            getattr(self.registry, "calendar_service", None),
+            title=title,
+            start=start,
+            all_day=True,
+            recurrence=recurrence,
+        )
 
     async def add_personal_date(
         self, *, owner_id: int, kind: str, base_date: date

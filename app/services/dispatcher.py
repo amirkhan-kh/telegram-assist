@@ -53,6 +53,7 @@ from app.db.models.enums import (
     Source,
     TaskKind,
 )
+from app.integrations.google.calendar import add_calendar_event
 from app.logging_conf import get_logger
 from app.repositories import (
     finance_repo,
@@ -1093,10 +1094,14 @@ async def _create_reminder(
         pre_alerts_minutes=params.pre_alerts_minutes,
         source=Source.nlu,
     )
-    return DispatchResult(
-        f"⏰ Eslatma qo'yildi: {params.text}\n🕒 Vaqt: {_local(when_dt, registry)}",
-        reply_markup=undo_button(KIND_REMINDER, reminder.id),
+    # Best-effort: also place the dated reminder on the owner's Google Calendar.
+    cal_link = await add_calendar_event(
+        registry.calendar_service, title=params.text, start=when_dt
     )
+    text = f"⏰ Eslatma qo'yildi: {params.text}\n🕒 Vaqt: {_local(when_dt, registry)}"
+    if cal_link:
+        text += "\n📅 Kalendarga ham qo'shildi."
+    return DispatchResult(text, reply_markup=undo_button(KIND_REMINDER, reminder.id))
 
 
 # Weekday index (0=Mon..6=Sun) -> APScheduler day_of_week name (avoids the
@@ -1177,11 +1182,17 @@ async def _create_promise(
         pre_alerts_minutes=params.pre_alerts_minutes,
         source=Source.nlu,
     )
-    return DispatchResult(
-        f"🤝 Va'da yozib qo'yildi: {params.what}\n"
-        f"🕒 Muddat: {_local(deadline_dt, registry)}",
-        reply_markup=undo_button(KIND_PROMISE, task.id),
+    # Best-effort: also surface the deadline on the owner's Google Calendar.
+    cal_link = await add_calendar_event(
+        registry.calendar_service, title=params.what, start=deadline_dt
     )
+    text = (
+        f"🤝 Va'da yozib qo'yildi: {params.what}\n"
+        f"🕒 Muddat: {_local(deadline_dt, registry)}"
+    )
+    if cal_link:
+        text += "\n📅 Kalendarga ham qo'shildi."
+    return DispatchResult(text, reply_markup=undo_button(KIND_PROMISE, task.id))
 
 
 async def _assign_task_with_followup(
@@ -1573,8 +1584,12 @@ async def _get_digest(
     summary = await digest.run(top_n=top_n, deliver=False)
     if not summary:
         return DispatchResult(
-            "Hozircha kanal faoliyati yo'q. Userbot kanallarga a'zo bo'lib, "
-            "yangi postlar kelganda dayjest tayyor bo'ladi."
+            "📭 Hozircha dayjest uchun material yo'q.\n"
+            "Dayjest siz a'zo bo'lgan Telegram <b>kanallari</b>ning eng faol "
+            "postlaridan tuziladi. Buning uchun: bot ulangan akkaunt orqali "
+            "kerakli yangiliklar kanallariga a'zo bo'ling — keyingi postlar "
+            "avtomatik yig'iladi va dayjestga tushadi.",
+            parse_mode="HTML",
         )
     return DispatchResult(summary, parse_mode="HTML")
 

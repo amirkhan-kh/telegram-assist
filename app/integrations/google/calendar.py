@@ -264,3 +264,81 @@ class GoogleCalendarService:
             )
 
         return await asyncio.to_thread(_call)
+
+    async def create_event(
+        self,
+        *,
+        title: str,
+        start: datetime,
+        end: datetime | None = None,
+        all_day: bool = False,
+        description: str | None = None,
+        recurrence: list[str] | None = None,
+        calendar_id: str = "primary",
+    ) -> dict[str, Any]:
+        """Create a plain calendar event (no Meet link); return the created event.
+
+        ``all_day`` writes bare local dates (Google's end date is exclusive, so a
+        one-day event ends the next day). A timed event defaults to a 30-minute
+        block when ``end`` is omitted. ``recurrence`` is a list of RRULE strings
+        (e.g. ``["RRULE:FREQ=YEARLY"]`` for an annual birthday). Blocking work
+        runs in a thread; raises on API/auth failure.
+        """
+
+        def _call() -> dict[str, Any]:
+            service = self._client()
+            event: dict[str, Any] = {"summary": title}
+            if description:
+                event["description"] = description
+            if all_day:
+                day = start.astimezone(self._tz).date()
+                end_day = end.astimezone(self._tz).date() if end else day + timedelta(days=1)
+                event["start"] = {"date": day.isoformat()}
+                event["end"] = {"date": end_day.isoformat()}
+            else:
+                end_dt = end or (start + timedelta(minutes=30))
+                event["start"] = {"dateTime": start.astimezone(UTC).isoformat()}
+                event["end"] = {"dateTime": end_dt.astimezone(UTC).isoformat()}
+            if recurrence:
+                event["recurrence"] = recurrence
+            return (
+                service.events()
+                .insert(calendarId=calendar_id, body=event)
+                .execute()
+            )
+
+        return await asyncio.to_thread(_call)
+
+
+async def add_calendar_event(
+    cal: GoogleCalendarService | None,
+    *,
+    title: str,
+    start: datetime,
+    end: datetime | None = None,
+    all_day: bool = False,
+    description: str | None = None,
+    recurrence: list[str] | None = None,
+) -> str | None:
+    """Best-effort: put a dated item on Google Calendar; return its link or None.
+
+    Never raises and never blocks the caller's flow — when Google is not
+    connected (or the API errors), the item is still saved internally and we
+    simply skip the calendar copy. Used by the reminder / promise / important-date
+    flows so date-bearing commands also surface under the Calendar view.
+    """
+    if cal is None or not cal.available():
+        return None
+    try:
+        event = await cal.create_event(
+            title=title,
+            start=start,
+            end=end,
+            all_day=all_day,
+            description=description,
+            recurrence=recurrence,
+        )
+        return event.get("htmlLink")
+    except Exception:  # noqa: BLE001 — calendar sync is best-effort
+        logger.exception("calendar.add_event.failed", title=title)
+        return None

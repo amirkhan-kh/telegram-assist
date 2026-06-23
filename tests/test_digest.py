@@ -83,7 +83,8 @@ async def test_get_digest_intent_returns_summary(registry):
 async def test_get_digest_empty_is_graceful(registry):
     routed = RoutedIntent("get_digest", GetDigest(top_n=5), {})
     result = await dispatch(registry, routed, now=utcnow())
-    assert "kanal faoliyati yo'q" in result.text.lower()
+    low = result.text.lower()
+    assert "material yo'q" in low and "kanal" in low
 
 
 async def test_digest_title_is_a_link_with_no_counts(registry):
