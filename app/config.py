@@ -58,6 +58,13 @@ class Settings(BaseSettings):
     # Prebuilt voice. Male: Charon, Puck, Fenrir, Orus, Enceladus, Iapetus.
     # Female: Kore, Aoede, Leda, Callirrhoe, Autonoe.
     gemini_tts_voice: str = "Charon"
+    # Natural-language delivery style for Gemini TTS, prepended to the text as a
+    # directive. The model SHAPES delivery with it but does NOT speak it aloud
+    # (verified by an STT round-trip). Empty string => plain synthesis.
+    gemini_tts_style: str = (
+        "Quyidagi o'zbekcha matnni tabiiy, samimiy va ishonchli ohangda, "
+        "tushunarli, o'rtacha tezlikda o'qing:"
+    )
     # Vertex AI path (uses a GCP service account instead of an API key; billed):
     gemini_use_vertex: bool = False
     google_cloud_project: str | None = None

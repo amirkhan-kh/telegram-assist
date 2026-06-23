@@ -108,10 +108,14 @@ class VoiceService:
         try:
             from google.genai import types
 
+            # A natural-language style directive steers delivery (tone, pace)
+            # without being spoken aloud; plain text when no style is configured.
+            style = (self.settings.gemini_tts_style or "").strip()
+            contents = f"{style}\n\n{text}" if style else text
             response = await asyncio.wait_for(
                 gemini.aio.models.generate_content(
                     model=self.settings.gemini_tts_model,
-                    contents=text,
+                    contents=contents,
                     config=types.GenerateContentConfig(
                         response_modalities=["AUDIO"],
                         speech_config=types.SpeechConfig(
@@ -239,15 +243,24 @@ class VoiceService:
     def _stt_prompt(hint_names: list[str] | None) -> str:
         """Build the Gemini transcription prompt, biased toward known names."""
         prompt = (
-            "Bu o'zbekcha audio xabarni so'zma-so'z, aniq MATNGA o'gir. "
-            "Ismlar va atoqli otlarni to'g'ri, to'liq yoz. Lotin alifbosida "
-            "yoz. Faqat aytilgan matnni qaytar — izoh, sarlavha yoki "
-            "qo'shimcha so'z qo'shma."
+            "Sen o'zbek tili (lotin) bo'yicha eng aniq transkripsiya tizimisan. "
+            "Ushbu ovozli xabarni SO'ZMA-SO'Z, hech narsa qo'shmasdan va "
+            "tushirmasdan matnga o'gir. Qoidalar:\n"
+            "- Faqat o'zbek lotin alifbosida yoz; o' va g' harflarini to'g'ri "
+            "qo'lla.\n"
+            "- Ismlar, familiyalar va joy nomlarini to'liq va to'g'ri yoz.\n"
+            "- Raqam, vaqt va sanalarni eshitilganidek aniq saqla, buzma.\n"
+            "- Tarjima qilma, qisqartirma, izoh berma, savol berma.\n"
+            "- Fon shovqini, duduqlanish va tasodifiy tovushlarni e'tiborsiz "
+            "qoldir.\n"
+            "- Faqat aytilgan matnni qaytar — sarlavha, tirnoq yoki qo'shimcha "
+            "so'z qo'shma."
         )
-        # Cap the list so the prompt stays small even with many contacts.
+        # Bias the model toward exact contact spellings. Cap the list so the
+        # prompt stays bounded even when the owner has a large phonebook.
         names = [n.strip() for n in (hint_names or []) if n and n.strip()]
         if names:
-            joined = ", ".join(names[:60])
+            joined = ", ".join(names[:200])
             prompt += (
                 " Quyidagilar foydalanuvchining kontaktlari — agar audioda "
                 "shulardan biriga o'xshash ism eshitilsa, AYNAN shu "

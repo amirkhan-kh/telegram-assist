@@ -51,9 +51,9 @@ def to_telegram_voice(src_path: str, *, out_dir: str | None = None) -> str:
         "-c:a",
         "libopus",
         "-b:a",
-        "32k",
+        "48k",
         "-application",
-        "voip",
+        "audio",
         out_path,
     ]
     logger.info("audio.transcode.start", src=src_path, out=out_path)

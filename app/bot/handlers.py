@@ -1314,26 +1314,31 @@ async def _transcribe_message(
         return ""
 
 
-# Cap on how many contacts are worth feeding to STT as spelling hints. A short
-# list (a few key contacts) sharpens name transcription; a large synced
-# phonebook would just be an arbitrary, noisy slice — so above this we skip the
-# hint entirely and let Gemini transcribe cleanly.
-_STT_HINT_MAX = 100
+# How many contact names to feed STT as spelling hints. A large synced phonebook
+# is noisy, so instead of all-or-nothing we send a BOUNDED, prioritized slice:
+# reachable Telegram contacts (the people the owner actually messages) first.
+_STT_HINT_MAX = 200
 
 
 async def _contact_hint_names(registry: ServiceRegistry) -> list[str]:
-    """Owner's saved contact names, fed to STT so spoken names spell correctly."""
+    """Owner's most relevant contact names, fed to STT for correct spelling."""
     try:
         async with registry.session() as session:
             people = await person_repo.list_all(session)
-        names = [p.display_name for p in people if p.display_name]
     except Exception as exc:  # noqa: BLE001 — names are a best-effort hint
         logger.warning("bot.contact_hints.failed", error=str(exc))
         return []
-    if len(names) > _STT_HINT_MAX:
-        logger.info("bot.contact_hints.skipped", count=len(names))
-        return []
-    return names
+    # Bias the slice toward reachable contacts (those with a Telegram id); skip
+    # the owner's own record. This keeps the hint useful even with thousands of
+    # synced numbers, where a flat list would just be an arbitrary, noisy cut.
+    reachable: list[str] = []
+    others: list[str] = []
+    for p in people:
+        name = (p.display_name or "").strip()
+        if not name or getattr(p, "is_owner", False):
+            continue
+        (reachable if p.telegram_user_id is not None else others).append(name)
+    return (reachable + others)[:_STT_HINT_MAX]
 
 
 # ── inline button callbacks ───────────────────────────────────────────────────
