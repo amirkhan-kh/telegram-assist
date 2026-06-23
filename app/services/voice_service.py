@@ -27,6 +27,22 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# System persona for the Gemini transcriber: built for noisy, real-world audio
+# (a moving car, wind, street). It tells the model to lock onto the nearest
+# speaker, ignore background noise, and recover noise-masked words from context
+# rather than emit gibberish — the goal is 95%+ usable, clean Uzbek text.
+_STT_SYSTEM = (
+    "Siz juda yuqori shovqinli muhitda (shamol, mashina, ko'cha shovqini, "
+    "signalizatsiya) yozilgan o'zbekcha audiolar bilan ishlovchi professional "
+    "nutqni aniqlash (STT) tizimisiz. Fon shovqinlariga mutlaqo e'tibor "
+    "bermang — faqat mikrofonga eng yaqin, asosiy so'zlovchining nutqini "
+    "tahlil qiling. Agar ba'zi so'zlar shovqin ostida qolib noaniq eshitilsa, "
+    "gapning umumiy kontekstidan kelib chiqib, mantiqan eng to'g'ri o'zbekcha "
+    "so'z bilan to'ldiring; tasodifiy tovushni so'z deb yozmang. Maqsad — "
+    "foydalanuvchi aytmoqchi bo'lgan gapni 95%+ aniqlikda, toza matn "
+    "ko'rinishida qaytarish."
+)
+
 
 class VoiceService:
     """Owner-voice text-to-speech and speech-to-text via ElevenLabs."""
@@ -291,7 +307,10 @@ class VoiceService:
                     types.Part.from_bytes(data=data, mime_type=mime_type or "audio/ogg"),
                     self._stt_prompt(hint_names),
                 ],
-                config=types.GenerateContentConfig(temperature=0),
+                config=types.GenerateContentConfig(
+                    temperature=0,
+                    system_instruction=_STT_SYSTEM,
+                ),
             )
             return (response.text or "").strip()
         except Exception as exc:  # noqa: BLE001 - never crash the voice handler

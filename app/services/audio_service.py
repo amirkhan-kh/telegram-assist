@@ -62,6 +62,53 @@ def to_telegram_voice(src_path: str, *, out_dir: str | None = None) -> str:
     return out_path
 
 
+# Speech-enhancement filter chain for NOISY *inbound* voice (car, wind, street),
+# applied before sending to STT — this is the audio the bot must understand:
+#   highpass=f=200    cut low-frequency engine/wind/handling rumble
+#   lowpass=f=3000    drop hiss/clatter above the intelligible speech band
+#   afftdn=nr=15:nt=w FFT denoise of steady background noise
+#   dynaudnorm        even out loudness so quiet speech stays audible
+_STT_FILTERS = "highpass=f=200,lowpass=f=3000,afftdn=nr=15:nt=w,dynaudnorm"
+
+
+def preprocess_for_stt(src_path: str, *, out_dir: str | None = None) -> str:
+    """Denoise + band-limit a voice clip for transcription; return a wav path.
+
+    Cleans wind/engine/street noise and normalizes loudness so the speech that
+    reaches Gemini is as clear as possible, then writes 16 kHz mono 16-bit PCM
+    WAV — the STT-ideal format. (PCM is lossless, so no ``-b:a`` bitrate applies;
+    it is cleaner for the model than re-compressing to 64–96k.) Blocking — run
+    via ``asyncio.to_thread``. Raises ``FileNotFoundError`` when ffmpeg is
+    missing and ``subprocess.CalledProcessError`` when the transcode fails.
+    """
+    if not ensure_ffmpeg():
+        raise FileNotFoundError(
+            "ffmpeg not found on PATH; cannot preprocess audio for STT."
+        )
+    target_dir = out_dir or os.path.dirname(os.path.abspath(src_path))
+    os.makedirs(target_dir, exist_ok=True)
+    out_path = os.path.join(target_dir, f"stt_{uuid.uuid4().hex}.wav")
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        src_path,
+        "-af",
+        _STT_FILTERS,
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-c:a",
+        "pcm_s16le",
+        out_path,
+    ]
+    logger.info("audio.preprocess.start", src=src_path, out=out_path)
+    subprocess.run(cmd, check=True, capture_output=True)
+    logger.info("audio.preprocess.done", out=out_path)
+    return out_path
+
+
 def pcm_to_telegram_voice(
     pcm: bytes,
     *,

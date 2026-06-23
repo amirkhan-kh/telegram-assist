@@ -91,3 +91,27 @@ async def test_tts_to_voice_note_produces_ogg_via_gemini(settings, tmp_path, mon
     assert os.path.exists(ogg)
     assert ogg.endswith(".ogg")
     assert os.path.getsize(ogg) > 0
+
+
+def test_preprocess_for_stt_outputs_16k_mono_wav(tmp_path):
+    """Inbound denoise yields a 16 kHz mono WAV ready for transcription."""
+    import wave
+
+    if not audio_service.ensure_ffmpeg():
+        import pytest
+
+        pytest.skip("ffmpeg not installed in this environment")
+
+    src = tmp_path / "in.wav"
+    with wave.open(str(src), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(24000)
+        w.writeframes(b"\x00\x10" * 7200)  # ~0.3s of low-level samples
+
+    out = audio_service.preprocess_for_stt(str(src), out_dir=str(tmp_path))
+    assert out.endswith(".wav") and os.path.exists(out)
+    with wave.open(out, "rb") as r:
+        assert r.getframerate() == 16000
+        assert r.getnchannels() == 1
+        assert r.getnframes() > 0

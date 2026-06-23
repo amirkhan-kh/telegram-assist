@@ -43,6 +43,11 @@ The current time is supplied to you inside <now>...</now> as an ISO-8601 \
 timestamp. Use it only to understand relative phrases; NEVER compute or output \
 an absolute timestamp yourself.
 
+NOISY INPUT: the text may come from voice transcription recorded in a car, wind \
+or street noise, so it can carry small mishearings. Read past minor errors and \
+infer the user's most likely intended command from context; do not refuse or \
+fall back to "unknown" just because a single word looks slightly off.
+
 PERSPECTIVE — this is the most important distinction:
 - If the OWNER is the one who will do the thing ("men ... qilaman", \
 "men ... yuboraman", "esimga sol", "menga eslat", "o'zimga eslat") -> this is a \

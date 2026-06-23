@@ -39,6 +39,7 @@ from app.brain.intents import (
 )
 from app.logging_conf import get_logger
 from app.repositories import person_repo
+from app.services import audio_service
 from app.services.dispatcher import (
     clear_pending_compose,
     clear_pending_outbound,
@@ -1306,8 +1307,19 @@ async def _transcribe_message(
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "voice.ogg")
             await tg_file.download_to_drive(path)
+            # Denoise/band-limit the raw clip first so noisy real-world audio
+            # (moving car, wind, street) reaches STT clean; fall back to the raw
+            # file when ffmpeg/preprocessing is unavailable.
+            stt_path, stt_mime = path, mime
+            try:
+                stt_path = await asyncio.to_thread(
+                    audio_service.preprocess_for_stt, path, out_dir=tmp
+                )
+                stt_mime = "audio/wav"
+            except Exception as exc:  # noqa: BLE001 — degrade to the raw audio
+                logger.warning("bot.preprocess.failed", error=str(exc))
             return await registry.voice_service.transcribe(  # type: ignore[union-attr]
-                path, mime_type=mime, hint_names=hint_names
+                stt_path, mime_type=stt_mime, hint_names=hint_names
             )
     except Exception as exc:  # noqa: BLE001 — degrade gracefully on download/STT error
         logger.warning("bot.transcribe.failed", error=str(exc))
