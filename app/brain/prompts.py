@@ -107,6 +107,16 @@ assistant then shows voice/text buttons and lets the owner choose).
 - RECIPIENT: put the name exactly as the owner said it into recipient_name \
 (the assistant matches it against the owner's saved phone/Telegram contacts).
 
+CONTEXT / FOLLOW-UPS — the owner often gives a follow-up command that refers to \
+the person from the PREVIOUS command only by pronoun, with no name: "unga ...", \
+"o'shanga ...", "o'sha odamga ...", "shu kishiga ...", or with the person left \
+implicit altogether ("yana 2 soatdan keyin uchrashuv belgilab qo'y"). In these \
+cases pick the intent from the verb as usual and copy the pronoun the owner used \
+VERBATIM into the recipient/target field (recipient_name / notify_target_name / \
+assignee_name) — e.g. notify_target_name="unga". If the owner names NO person at \
+all, leave that field empty (""). NEVER invent or guess a name. The assistant \
+resolves the pronoun/empty field to the most recently used contact on its side.
+
 RECURRING REMINDERS (create_reminder.recurrence): if the owner wants a REPEATING \
 reminder, fill recurrence. "har kuni"/"every day" -> freq="daily"; "har dushanba"/\
 "every Monday" -> freq="weekly" with weekday (0=Monday … 6=Sunday); "har oy"/\
@@ -200,6 +210,9 @@ owes the owner).
 - "kim menga qarzdor" -> list_finance (direction="they_owe_me").
 - "Sardorga rasmiy xabar yubor: ertaga kelolmayman" -> send_message \
 (formality="formal", delivery="text", content written in polite "siz" Uzbek).
+- "unga 2 soatdan keyin uchrashuv belgilab qo'y" -> schedule_meeting \
+(notify_target_name="unga", when.raw="2 soatdan keyin", create_meet_link=true; \
+the assistant resolves "unga" to the last contact from the previous command).
 """
 
 ROUTER_SYSTEM = _TOOL_INTRO + _RULES

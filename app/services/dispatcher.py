@@ -44,6 +44,7 @@ from app.bot.keyboards import (
 )
 from app.brain.contacts import ContactMatch, Disambiguation, resolve_contact
 from app.brain.time_parse import AmbiguousTime, parse_uz_time
+from app.brain.translit import normalize_name
 from app.db.models.enums import (
     DebtDirection,
     EventCategory,
@@ -567,6 +568,115 @@ def _numbered_prompt(name: str, candidates: list[ContactMatch]) -> str:
     return "\n".join(lines)
 
 
+# ── short-term contact memory (coreference) ───────────────────────────────────
+# After the owner names a contact (send/schedule/meeting/assign), a follow-up
+# command may refer to that same person only by pronoun ("unga ...", "o'sha
+# odamga ...") or leave the name out entirely. We remember the last contact the
+# owner acted on, per owner, so the follow-up resolves without re-naming. It is
+# in-memory only and stays until a NEW contact name is used (which overwrites
+# it) — a conversational convenience, not a persisted record.
+@dataclass
+class _LastContact:
+    """The contact the owner most recently acted on (for vague follow-ups)."""
+
+    person_id: int
+    display_name: str
+
+
+_LAST_CONTACT: dict[int, _LastContact] = {}
+
+
+def clear_last_contact(owner_key: int) -> None:
+    """Forget the remembered contact (used by tests / explicit resets)."""
+    _LAST_CONTACT.pop(owner_key, None)
+
+
+def _remember_contact(owner_key: int, match: ContactMatch) -> None:
+    """Record ``match`` as the contact a vague follow-up should resolve to."""
+    _LAST_CONTACT[owner_key] = _LastContact(
+        person_id=match.person_id, display_name=match.display_name
+    )
+
+
+def _peek_last_contact(owner_key: int) -> _LastContact | None:
+    """The remembered contact, or ``None`` if the owner hasn't named one yet."""
+    return _LAST_CONTACT.get(owner_key)
+
+
+# Pronoun / demonstrative forms that, used alone, point back at the last contact
+# ("unga xabar yubor", "o'shanga ayt"). Normalized so apostrophes/script differ
+# harmlessly ("o'sha" == "osha").
+_REF_PRONOUNS = frozenset(
+    normalize_name(w)
+    for w in (
+        "u", "uni", "unga", "undan", "ul", "shu", "shuni", "shunga", "shundan",
+        "o'sha", "o'shani", "o'shanga", "o'shandan", "o'shu", "ushbu",
+        "usha", "ushani", "ushanga", "o'zi", "o'ziga", "o'zini", "vu",
+    )
+)
+# Demonstratives that may LEAD a "<dem> <person-noun>" phrase ("o'sha odam").
+_REF_DEMONSTRATIVES = frozenset(
+    normalize_name(w)
+    for w in ("u", "shu", "o'sha", "o'shu", "ushbu", "usha", "mana", "ana")
+)
+# Generic person nouns (incl. kinship honorifics) that refer back AFTER a
+# demonstrative ("o'sha odamga", "shu opaga", "o'sha bolaga").
+_REF_PERSON_NOUNS = frozenset(
+    normalize_name(w)
+    for w in (
+        "odam", "kishi", "inson", "kontakt", "bola", "bolakay", "yigit", "qiz",
+        "ayol", "erkak", "aka", "opa", "uka", "amaki", "xola", "toga", "ona",
+        "ota", "buvi", "bobo", "singil", "kelin", "jiyan", "og'a", "apa",
+    )
+)
+# Person nouns unambiguous enough to stand ALONE (no contact is saved as these).
+_REF_SOLO_NOUNS = frozenset(normalize_name(w) for w in ("kontakt", "kishi", "inson"))
+
+# Trailing dative/locative case suffixes peeled before matching a person noun
+# ("odamga" -> "odam", "kishiga" -> "kishi"). Pronouns are matched whole first,
+# so their glued "-ga" ("unga", "shunga") is never stripped.
+_REF_CASE_SUFFIXES = ("niki", "ning", "ga", "ka", "qa", "ni", "dan", "da", "cha")
+
+
+def _ref_stem(token: str) -> str:
+    """Peel one trailing case suffix off a normalized token (>=3-char stem kept)."""
+    for suf in _REF_CASE_SUFFIXES:
+        if token.endswith(suf) and len(token) - len(suf) >= 3:
+            return token[: -len(suf)]
+    return token
+
+
+def _refers_to_last_contact(name: str) -> bool:
+    """True when ``name`` is a bare pronoun or "<dem> <person>" (no real name).
+
+    Matches "u", "unga", "o'sha odam", "shu kishiga", "o'sha opaga". A generic
+    word with NO demonstrative ("Odamga", "Qizga") does NOT match, so a contact
+    that happens to be such a word is never hijacked.
+    """
+    toks = [normalize_name(t) for t in (name or "").split()]
+    toks = [t for t in toks if t]
+    if not toks:
+        return False
+    has_dem = any(t in _REF_DEMONSTRATIVES for t in toks)
+    for t in toks:
+        if t in _REF_PRONOUNS or t in _REF_DEMONSTRATIVES:
+            continue
+        stem = _ref_stem(t)
+        if stem in _REF_SOLO_NOUNS:
+            continue
+        if has_dem and (stem in _REF_PERSON_NOUNS or t in _REF_PERSON_NOUNS):
+            continue
+        return False
+    return True
+
+
+def _is_contact_reference(name: str) -> bool:
+    """True when ``name`` is empty or refers back to the last-mentioned contact."""
+    if not (name or "").strip():
+        return True
+    return _refers_to_last_contact(name)
+
+
 async def _resolve_or_pend(
     registry: ServiceRegistry,
     name: str,
@@ -582,17 +692,42 @@ async def _resolve_or_pend(
     numbered prompt, stored as pending, or a not-found message) the caller should
     return; or ``None`` when not found and ``required`` is ``False`` (the caller
     proceeds without a contact). A forced id (set during a selection re-run)
-    short-circuits resolution to the chosen person.
+    short-circuits resolution to the chosen person. A vague follow-up (a pronoun
+    or no name) resolves to the last contact the owner acted on; every successful
+    resolution is remembered so the NEXT such follow-up has something to point at.
     """
+    owner_key = registry.settings.owner_chat_id
     forced = _forced_person_id.get()
     if forced is not None:
         async with registry.session() as session:
             person = await person_repo.get_by_id(session, forced)
         if person is not None:
-            return _match_from_person(person)
+            match = _match_from_person(person)
+            _remember_contact(owner_key, match)
+            return match
+
+    # Coreference: a bare pronoun ("unga"), a "<dem> <person>" phrase ("o'sha
+    # odamga"), or no name at all reuses the contact the owner just acted on.
+    if _is_contact_reference(name):
+        last = _peek_last_contact(owner_key)
+        if last is not None:
+            async with registry.session() as session:
+                person = await person_repo.get_by_id(session, last.person_id)
+            if person is not None:
+                match = _match_from_person(person)
+                _remember_contact(owner_key, match)
+                # Replace the pronoun with the real name so downstream
+                # confirmations ("... ga yuborildi") read naturally.
+                setattr(params, field, match.display_name)
+                return match
+        # Referred back to "them" but no contact has been named yet this session.
+        return DispatchResult(
+            "Kimga ekanini aniqlay olmadim — iltimos, kontakt nomini ayting."
+        )
 
     resolved = await _resolve_recipient(registry, name)
     if isinstance(resolved, ContactMatch):
+        _remember_contact(owner_key, resolved)
         return resolved
     if resolved is None:
         if not required:
