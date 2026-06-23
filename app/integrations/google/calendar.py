@@ -35,6 +35,7 @@ class CalEvent:
     all_day: bool
     location: str | None
     link: str | None         # Meet link (hangoutLink) or the event's htmlLink
+    id: str | None = None    # the Google event id (for delete); None if absent
 
 # Uzbek-friendly note shown when Google is not configured.
 _NOT_CONFIGURED_UZ = (
@@ -135,6 +136,7 @@ class GoogleCalendarService:
                         all_day=all_day,
                         location=e.get("location"),
                         link=e.get("hangoutLink") or e.get("htmlLink"),
+                        id=e.get("id"),
                     )
                 )
             return out
@@ -306,6 +308,29 @@ class GoogleCalendarService:
                 .insert(calendarId=calendar_id, body=event)
                 .execute()
             )
+
+        return await asyncio.to_thread(_call)
+
+    async def delete_event(
+        self, event_id: str, *, calendar_id: str = "primary"
+    ) -> bool:
+        """Delete an event by id; ``True`` on success. Best-effort, never raises.
+
+        A listed instance of a recurring event has an id like ``<baseid>_<stamp>``;
+        we delete the BASE id so the whole series is removed (the owner wanted the
+        date gone, not just one occurrence).
+        """
+
+        def _call() -> bool:
+            base = event_id.split("_")[0] if "_" in event_id else event_id
+            try:
+                self._client().events().delete(
+                    calendarId=calendar_id, eventId=base
+                ).execute()
+                return True
+            except Exception:  # noqa: BLE001 — already gone / no access
+                logger.exception("calendar.delete_event.failed", event_id=event_id)
+                return False
 
         return await asyncio.to_thread(_call)
 

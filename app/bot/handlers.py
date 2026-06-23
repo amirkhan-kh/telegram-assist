@@ -45,6 +45,8 @@ from app.services.dispatcher import (
     clear_pending_outbound,
     clear_pending_time,
     complete_outbound,
+    delete_calendar_event,
+    delete_list_item,
     dispatch,
     dispatch_compose,
     has_pending,
@@ -298,6 +300,55 @@ async def _handle_tday_callback(registry: ServiceRegistry, query: object) -> Non
             parse_mode=result.parse_mode,
             reply_markup=result.reply_markup,
         )
+
+
+async def _edit_or_reply(query: object, result: object) -> None:
+    """Replace the tapped message with ``result`` (edit; else post a fresh reply)."""
+    message = query.message  # type: ignore[attr-defined]
+    if message is None:
+        return
+    try:
+        await query.edit_message_text(  # type: ignore[attr-defined]
+            result.text,
+            parse_mode=result.parse_mode,
+            reply_markup=result.reply_markup,
+        )
+    except Exception:  # noqa: BLE001 — uneditable/unchanged: post a fresh reply
+        await message.reply_text(
+            result.text,
+            parse_mode=result.parse_mode,
+            reply_markup=result.reply_markup,
+        )
+
+
+async def _handle_delete_callback(registry: ServiceRegistry, query: object) -> None:
+    """Handle a ``del:<kind>:<id>:<src>`` tap: delete the item, refresh the list."""
+    parts = query.data.split(":")  # type: ignore[attr-defined]
+    if len(parts) < 4 or not parts[2].isdigit():
+        await query.answer()  # type: ignore[attr-defined]
+        return
+    kind, item_id, src = parts[1], int(parts[2]), parts[3]
+    toast, result = await delete_list_item(
+        registry, kind, item_id, src, now=datetime.now(UTC)
+    )
+    await query.answer(toast)  # type: ignore[attr-defined]
+    if result is not None:
+        await _edit_or_reply(query, result)
+
+
+async def _handle_delcal_callback(registry: ServiceRegistry, query: object) -> None:
+    """Handle a ``delcal:<event_id>`` tap: delete that Google Calendar event."""
+    data = query.data  # type: ignore[attr-defined]
+    event_id = data.split(":", 1)[1] if ":" in data else ""
+    if not event_id:
+        await query.answer()  # type: ignore[attr-defined]
+        return
+    toast, result = await delete_calendar_event(
+        registry, event_id, now=datetime.now(UTC)
+    )
+    await query.answer(toast)  # type: ignore[attr-defined]
+    if result is not None:
+        await _edit_or_reply(query, result)
 
 
 async def _handle_paid_callback(registry: ServiceRegistry, query: object) -> None:
@@ -1402,6 +1453,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     if data.startswith("paid:"):
         await _handle_paid_callback(registry, query)
+        return
+    if data.startswith("delcal:"):
+        await _handle_delcal_callback(registry, query)
+        return
+    if data.startswith("del:"):
+        await _handle_delete_callback(registry, query)
         return
     if data.startswith("tday:"):
         await _handle_tday_callback(registry, query)

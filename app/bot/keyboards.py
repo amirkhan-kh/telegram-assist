@@ -145,6 +145,40 @@ def debt_settle_keyboard(
     return InlineKeyboardMarkup(rows)
 
 
+# ── per-item delete straight from a list view (like the debts «✅») ────────────
+# Simple ``del:<kind>:<id>:<src>`` payload handled directly in on_callback. ``src``
+# is the list to re-render after deleting (rl=reminders, id=dates, dc=decisions,
+# ag=agenda-all, agt=agenda-today) so the list refreshes with that item gone.
+def list_delete_keyboard(
+    items: list[tuple[str, int, str]], src: str
+) -> InlineKeyboardMarkup | None:
+    """A «🗑 <title>» button per listed item (deletes it, refreshes the list)."""
+    rows: list[list[_Btn]] = []
+    for kind, item_id, title in items[:20]:
+        label = title if len(title) <= 34 else title[:33] + "…"
+        rows.append(
+            [_Btn(f"🗑 {label}", callback_data=f"del:{kind}:{item_id}:{src}")]
+        )
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
+# Google Calendar events carry a STRING id (not an int), so they use their own
+# ``delcal:<event_id>`` payload. Buttons whose payload would blow Telegram's
+# 64-byte budget are skipped (the rest of the list is still deletable).
+def calendar_delete_keyboard(
+    items: list[tuple[str, str]],
+) -> InlineKeyboardMarkup | None:
+    """A «🗑 <title>» button per Google Calendar event (deletes it)."""
+    rows: list[list[_Btn]] = []
+    for event_id, title in items[:20]:
+        payload = f"delcal:{event_id}"
+        if len(payload.encode("utf-8")) > 60:
+            continue
+        label = title if len(title) <= 34 else title[:33] + "…"
+        rows.append([_Btn(f"🗑 {label}", callback_data=payload)])
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
 # ── time clarification: pick the DAY when a command names no day ──────────────
 # Simple ``tday:<code>`` payload handled directly in on_callback. Codes: d0/d1/d2
 # = today/tomorrow/day-after; w0..w6 = next Mon..Sun; "other" = type a date.

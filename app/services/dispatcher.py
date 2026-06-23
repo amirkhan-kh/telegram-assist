@@ -36,8 +36,10 @@ from app.bot.keyboards import (
     KIND_PROMISE,
     KIND_REMINDER,
     KIND_TASK,
+    calendar_delete_keyboard,
     contact_pick_keyboard,
     debt_settle_keyboard,
+    list_delete_keyboard,
     outbound_choice_keyboard,
     time_day_keyboard,
     undo_button,
@@ -252,6 +254,81 @@ async def settle_debt(
         registry,
         RoutedIntent("list_finance", ListFinance(direction=direction), {}),
         now=now,
+    )
+    return toast, relist
+
+
+async def _cancel_item_by_kind(
+    registry: ServiceRegistry, kind: str, item_id: int
+) -> bool:
+    """Delete/cancel one listed item by its kind code; ``True`` on success."""
+    if kind == KIND_REMINDER:
+        await registry.reminder_service.cancel(item_id)
+        return True
+    if kind in (KIND_PROMISE, KIND_TASK):
+        await registry.task_service.cancel(item_id)
+        return True
+    if kind == KIND_MEETING:
+        return await registry.meeting_service.cancel(item_id)
+    if kind == KIND_EVENT:
+        return await registry.event_service.cancel(item_id)
+    if kind == KIND_DECISION:
+        return await registry.decision_service.delete(item_id)
+    if kind == KIND_FINANCE:
+        return await registry.finance_service.delete(item_id)
+    if kind == KIND_MESSAGE:
+        return await registry.message_service.cancel(item_id)
+    return False
+
+
+def _refresh_intent_for_src(src: str) -> RoutedIntent | None:
+    """Map a list-delete ``src`` code to the intent that re-renders that list."""
+    from app.brain.intent_router import RoutedIntent
+    from app.brain.intents import (
+        ListAgenda,
+        ListDecisions,
+        ListImportantDates,
+        ListReminders,
+    )
+
+    if src == "rl":
+        return RoutedIntent("list_reminders", ListReminders(), {})
+    if src == "id":
+        return RoutedIntent("list_important_dates", ListImportantDates(), {})
+    if src == "dc":
+        return RoutedIntent("list_decisions", ListDecisions(), {})
+    if src == "ag":
+        return RoutedIntent("list_agenda", ListAgenda(scope="all"), {})
+    if src == "agt":
+        return RoutedIntent("list_agenda", ListAgenda(scope="today"), {})
+    return None
+
+
+async def delete_list_item(
+    registry: ServiceRegistry, kind: str, item_id: int, src: str, *, now: datetime
+) -> tuple[str, DispatchResult | None]:
+    """Delete a listed item and return ``(toast, refreshed list)`` to re-render."""
+    ok = await _cancel_item_by_kind(registry, kind, item_id)
+    toast = "🗑 O'chirildi" if ok else "Topilmadi yoki allaqachon o'chirilgan"
+    intent = _refresh_intent_for_src(src)
+    relist = await dispatch(registry, intent, now=now) if intent is not None else None
+    return toast, relist
+
+
+async def delete_calendar_event(
+    registry: ServiceRegistry, event_id: str, *, now: datetime
+) -> tuple[str, DispatchResult | None]:
+    """Delete a Google Calendar event and return ``(toast, refreshed calendar)``."""
+    from app.brain.intent_router import RoutedIntent
+    from app.brain.intents import ShowCalendar
+
+    cal = registry.calendar_service
+    ok = False
+    if cal is not None and cal.available():
+        ok = await cal.delete_event(event_id)
+    toast = "🗑 Kalendardan o'chirildi" if ok else "O'chirib bo'lmadi"
+    relist = await dispatch(
+        registry, RoutedIntent("show_calendar", ShowCalendar(scope="week"), {}), now=now
     )
     return toast, relist
 
@@ -1826,9 +1903,10 @@ async def _list_agenda(
 
     # Overdue (past, still-pending) WORK — promises + tracked tasks only — so it
     # surfaces in both the "today" and "all" views. Reminders are excluded above.
-    overdue: list[str] = []
-    overdue += [p.title for p in promises if _is_past(p.due_at)]
-    overdue += [f"{n}: {t.title}" for n, t in delegated if _is_past(t.due_at)]
+    overdue_promises = [p for p in promises if _is_past(p.due_at)]
+    overdue_delegated = [(n, t) for n, t in delegated if _is_past(t.due_at)]
+    overdue: list[str] = [p.title for p in overdue_promises]
+    overdue += [f"{n}: {t.title}" for n, t in overdue_delegated]
 
     if today_only:
         reminders = [r for r in reminders if _is_today(r.due_at)]
@@ -1897,8 +1975,32 @@ async def _list_agenda(
             if today_only
             else "Rejangiz bo'sh — hozircha hech narsa yo'q."
         )
+
+    # Per-item delete buttons across every shown item (incl. overdue work).
+    del_items: list[tuple[str, int, str]] = []
+    seen: set[tuple[str, int]] = set()
+
+    def _add_del(kind: str, iid: int, label: str) -> None:
+        if (kind, iid) not in seen:
+            seen.add((kind, iid))
+            del_items.append((kind, iid, label))
+
+    for r in reminders:
+        _add_del(KIND_REMINDER, r.id, r.title)
+    for p in [*promises, *overdue_promises]:
+        _add_del(KIND_PROMISE, p.id, p.title)
+    for name, t in [*delegated, *overdue_delegated]:
+        _add_del(KIND_TASK, t.id, f"{name}: {t.title}")
+    for m in meetings:
+        _add_del(KIND_MEETING, m.id, m.title)
+
     title = "📋 <b>Bugungi rejangiz</b>" if today_only else "📋 <b>Rejangiz</b>"
-    return DispatchResult(title + "\n\n" + "\n\n".join(blocks), parse_mode="HTML")
+    src = "agt" if today_only else "ag"
+    return DispatchResult(
+        title + "\n\n" + "\n\n".join(blocks),
+        parse_mode="HTML",
+        reply_markup=list_delete_keyboard(del_items, src),
+    )
 
 
 async def _list_reminders(
@@ -1927,17 +2029,21 @@ async def _list_reminders(
         key=lambda r: (r.due_at is None, as_utc(r.due_at) if r.due_at else as_utc(now))
     )
     lines: list[str] = []
+    del_items: list[tuple[str, int, str]] = []
     for r in reminders:
         title = html.escape(r.title, quote=False)
         if r.recurrence:
             lines.append(f"🔁 {title} — {html.escape(r.recurrence, quote=False)}")
         else:
             lines.append(f"⏰ {title} — {_local(r.due_at, registry)}")
+        del_items.append((KIND_REMINDER, r.id, r.title))
     text = (
         f"⏰ <b>Eslatmalarim ({len(reminders)})</b>\n"
         f"<blockquote expandable>{chr(10).join(lines)}</blockquote>"
     )
-    return DispatchResult(text, parse_mode="HTML")
+    return DispatchResult(
+        text, parse_mode="HTML", reply_markup=list_delete_keyboard(del_items, "rl")
+    )
 
 
 async def _list_meetings(
@@ -2045,6 +2151,7 @@ async def _list_important_dates(
     from app.services.event_service import category_icon
 
     items: list[str] = []
+    del_items: list[tuple[str, int, str]] = []
     for event in events:
         icon = category_icon(event.category)
         date_str = event.event_date.strftime("%d.%m")
@@ -2057,13 +2164,16 @@ async def _list_important_dates(
                 left = f" — {days_left} kun qoldi"
         title = html.escape(event.title, quote=False)
         items.append(f"{icon} <b>{title}</b> — {date_str}{left}")
+        del_items.append((KIND_EVENT, event.id, event.title))
 
     body = "\n".join(items)
     text = (
         f"📆 <b>Muhim sanalar ({len(events)})</b>\n"
         f"<blockquote expandable>{body}</blockquote>"
     )
-    return DispatchResult(text, parse_mode="HTML")
+    return DispatchResult(
+        text, parse_mode="HTML", reply_markup=list_delete_keyboard(del_items, "id")
+    )
 
 
 # ── decisions journal ─────────────────────────────────────────────────────────
@@ -2105,18 +2215,22 @@ async def _list_decisions(
         )
 
     items: list[str] = []
+    del_items: list[tuple[str, int, str]] = []
     for decision in decisions:
         when = _local(decision.decided_at, registry)
         text = html.escape(decision.text, quote=False)
         tag = f" #{html.escape(decision.tag, quote=False)}" if decision.tag else ""
         items.append(f"• <i>{when}</i>{tag}\n{text}")
+        del_items.append((KIND_DECISION, decision.id, decision.text))
 
     body = "\n\n".join(items)
     out = (
         f"📓 <b>Qarorlar arxivi ({len(decisions)})</b>\n"
         f"<blockquote expandable>{body}</blockquote>"
     )
-    return DispatchResult(out, parse_mode="HTML")
+    return DispatchResult(
+        out, parse_mode="HTML", reply_markup=list_delete_keyboard(del_items, "dc")
+    )
 
 
 # ── Gmail (read-only) ─────────────────────────────────────────────────────────
@@ -2247,6 +2361,7 @@ async def _show_calendar(
         )
 
     blocks = [header]
+    cal_items: list[tuple[str, str]] = []
     for i in range(days):
         d = today + timedelta(days=i)
         evs = sorted(by_day.get(d, []), key=lambda e: as_utc(e.start))
@@ -2268,13 +2383,19 @@ async def _show_calendar(
             if ev.link:
                 line += f' <a href="{html.escape(ev.link, quote=True)}">🔗</a>'
             lines.append(line)
+            if ev.id:
+                cal_items.append((ev.id, f"{d.strftime('%d.%m')} {when} {ev.summary}"))
         if len(evs) > 8:
             lines.append(f"… va yana {len(evs) - 8} ta")
         blocks.append(
             f"<b>📅 {html.escape(label, quote=False)}</b>\n"
             f"<blockquote>{chr(10).join(lines)}</blockquote>"
         )
-    return DispatchResult("\n\n".join(blocks), parse_mode="HTML")
+    return DispatchResult(
+        "\n\n".join(blocks),
+        parse_mode="HTML",
+        reply_markup=calendar_delete_keyboard(cal_items),
+    )
 
 
 # ── shared resolution helper ──────────────────────────────────────────────────
