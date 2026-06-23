@@ -940,9 +940,13 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await message.chat.send_action(ChatAction.TYPING)
     text = await _transcribe_message(registry, message, media)
     if not text:
+        logger.info("bot.voice.transcribed_empty")
         await message.reply_text(_STT_FAILED)
         return
 
+    # Log the transcription so voice issues are debuggable from the server logs
+    # (the owner also sees the echo below and can catch a mis-hearing).
+    logger.info("bot.voice.transcribed", chars=len(text), text=text)
     # Echo what we heard so the owner can catch a mis-hearing, then act on it.
     await message.reply_text(f"🎙 «{text}»")
     await _route_and_reply(registry, message, text)

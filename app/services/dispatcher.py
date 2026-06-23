@@ -730,6 +730,7 @@ async def _resolve_or_pend(
         _remember_contact(owner_key, resolved)
         return resolved
     if resolved is None:
+        logger.info("dispatch.contact.not_found", intent=intent_name, name=name)
         if not required:
             return None
         return DispatchResult(
