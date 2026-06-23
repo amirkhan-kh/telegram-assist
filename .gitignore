@@ -1,5 +1,6 @@
 # Secrets / env
 .env
+.env.bak*
 *.session
 *.session-journal
 data/
