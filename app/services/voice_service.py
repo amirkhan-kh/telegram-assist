@@ -18,6 +18,7 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from app.integrations import google_stt
 from app.integrations.elevenlabs_client import get_elevenlabs
 from app.logging_conf import get_logger
 from app.services import audio_service
@@ -86,9 +87,21 @@ class VoiceService:
         """True when speech-to-text is possible (ElevenLabs Scribe OR Gemini).
 
         STT needs neither a cloned voice nor ffmpeg — just one provider key.
+        (Chirp 2 reuses the Vertex GCP path, already covered below.)
         """
         s = self.settings
         return bool(s.elevenlabs_api_key or s.gemini_api_key or s.gemini_use_vertex)
+
+    def _chirp_ready(self) -> bool:
+        """True when Chirp 2 (Speech-to-Text V2) is the chosen primary STT.
+
+        Reuses the Vertex GCP auth: a project id must be resolvable, directly or
+        via the service-account file. Disable with ``STT_USE_CHIRP=false``.
+        """
+        s = self.settings
+        if not s.stt_use_chirp:
+            return False
+        return bool(s.google_cloud_project or s.google_application_credentials)
 
     # ── TTS ───────────────────────────────────────────────────────────────
     async def tts_to_voice_note(
@@ -238,11 +251,27 @@ class VoiceService:
         Gemini's multimodal transcription (free) so voice commands work without
         ElevenLabs. Any speaker (male/female) is supported.
 
-        ``hint_names`` is the owner's known contact names; they are fed to the
-        Gemini transcriber so spoken names are spelled exactly as saved
-        (e.g. "Asadbek" never becomes "Asatbek") — the single biggest win for
-        voice-command accuracy.
+        ``hint_names`` is the owner's known contact names; they are fed to every
+        engine (Chirp phrase hints / Gemini prompt) so spoken names are spelled
+        exactly as saved (e.g. "Asadbek" never becomes "Asatbek") — the single
+        biggest win for voice-command accuracy.
+
+        Engine order: Chirp 2 (primary, when enabled) -> ElevenLabs Scribe (when
+        a cloned-voice key is set) -> Gemini multimodal (free fallback). Each
+        failure degrades to the next so a voice command is never lost.
         """
+        # 1. Chirp 2 (Google Cloud Speech-to-Text V2) — primary ASR engine.
+        if self._chirp_ready():
+            try:
+                data = await asyncio.to_thread(Path(audio_path).read_bytes)
+                text = await asyncio.to_thread(
+                    google_stt.transcribe_chirp_sync, self.settings, data, hint_names
+                )
+                if text:
+                    return text
+            except Exception as exc:  # noqa: BLE001 - degrade to ElevenLabs/Gemini
+                logger.warning("voice.stt.chirp_failed", error=str(exc))
+        # 2. ElevenLabs Scribe — when a cloned-voice key is configured.
         client = self._get_client()
         if client is not None:
             try:
@@ -253,6 +282,7 @@ class VoiceService:
                     return text
             except Exception as exc:  # noqa: BLE001 - degrade to the Gemini path
                 logger.warning("voice.stt.elevenlabs_failed", error=str(exc))
+        # 3. Gemini multimodal — free fallback.
         return await self._transcribe_gemini(audio_path, mime_type, hint_names)
 
     @staticmethod

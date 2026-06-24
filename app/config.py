@@ -72,6 +72,19 @@ class Settings(BaseSettings):
     # Path to a service-account JSON (Vertex AI auth). Sets ADC when present.
     google_application_credentials: str | None = None
 
+    # ── Speech-to-Text: Chirp 2 (Google Cloud Speech-to-Text V2) ──────────
+    # Primary STT engine when enabled. Reuses the Vertex GCP service account /
+    # project above (no extra key). Speech-to-Text is a SEPARATE API from Vertex
+    # Gemini: enable it on the project and grant the service account the
+    # "Cloud Speech-to-Text User" role before switching this on. On any failure
+    # the bot falls back to ElevenLabs/Gemini, so toggling it is always safe.
+    stt_use_chirp: bool = False
+    google_stt_model: str = "chirp_2"
+    google_stt_language: str = "uz-UZ"
+    # Regional endpoint for Chirp 2. Uzbek + chirp_2 availability is region-
+    # specific; if a region rejects the language/model, try "global".
+    google_stt_location: str = "us-central1"
+
     # ── Voice (ElevenLabs) ────────────────────────────────────────────────
     elevenlabs_api_key: str = ""
     elevenlabs_voice_id: str | None = None

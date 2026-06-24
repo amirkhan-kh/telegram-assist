@@ -20,6 +20,7 @@ cryptography==44.0.0                 # Fernet encryption for `secrets` table
 # ── AI / voice ─────────────────────────────────────────────────────────
 anthropic==0.42.0                    # Claude — NLU brain (tool-use)
 google-genai==2.8.0                  # Gemini — alternative NLU brain (free tier)
+google-cloud-speech==2.40.0          # Chirp 2 — primary Uzbek STT (Speech-to-Text V2)
 elevenlabs==1.50.3                   # TTS + voice clone + Scribe STT
 
 # ── Time parsing ───────────────────────────────────────────────────────
