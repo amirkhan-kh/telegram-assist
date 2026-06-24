@@ -695,7 +695,8 @@ _REF_PRONOUNS = frozenset(
 # Demonstratives that may LEAD a "<dem> <person-noun>" phrase ("o'sha odam").
 _REF_DEMONSTRATIVES = frozenset(
     normalize_name(w)
-    for w in ("u", "shu", "o'sha", "o'shu", "ushbu", "usha", "mana", "ana")
+    for w in ("u", "shu", "o'sha", "o'shu", "ushbu", "usha", "mana", "ana",
+              "anavi", "anavu", "manavi")
 )
 # Generic person nouns (incl. kinship honorifics) that refer back AFTER a
 # demonstrative ("o'sha odamga", "shu opaga", "o'sha bolaga").
@@ -709,6 +710,20 @@ _REF_PERSON_NOUNS = frozenset(
 )
 # Person nouns unambiguous enough to stand ALONE (no contact is saved as these).
 _REF_SOLO_NOUNS = frozenset(normalize_name(w) for w in ("kontakt", "kishi", "inson"))
+
+# Referential pointer-nouns: NOT a name, but a reference to a person via something
+# else — "shu raqam egasi" (this number's owner), "shu ro'yxatdagi", "anavi nomer".
+# No real contact is ever saved as one of these, so — unlike person nouns — they
+# stand ALONE too (no leading demonstrative required): "raqam egasiga xabar ber"
+# is just as vague as "shu raqam egasiga". Matched on the case-stripped stem so
+# "egasiga"->"egasi", "raqamga"->"raqam" resolve.
+_REF_REFERENT_NOUNS = frozenset(
+    normalize_name(w)
+    for w in (
+        "raqam", "nomer", "nomeri", "telefon", "egasi", "ega", "egasiga",
+        "ro'yxat", "ro'yxatdagi", "ro'yxatdan", "raqamdagi",
+    )
+)
 
 # Trailing dative/locative case suffixes peeled before matching a person noun
 # ("odamga" -> "odam", "kishiga" -> "kishi"). Pronouns are matched whole first,
@@ -725,11 +740,14 @@ def _ref_stem(token: str) -> str:
 
 
 def _refers_to_last_contact(name: str) -> bool:
-    """True when ``name`` is a bare pronoun or "<dem> <person>" (no real name).
+    """True when ``name`` is a bare pronoun, "<dem> <person>", or a pointer-noun.
 
-    Matches "u", "unga", "o'sha odam", "shu kishiga", "o'sha opaga". A generic
-    word with NO demonstrative ("Odamga", "Qizga") does NOT match, so a contact
-    that happens to be such a word is never hijacked.
+    Matches "u", "unga", "o'sha odam", "shu kishiga", "o'sha opaga", and
+    referential phrases that name nobody — "shu raqam egasiga", "raqam egasiga",
+    "shu ro'yxatdagi". A generic PERSON word with NO demonstrative ("Odamga",
+    "Qizga") does NOT match, so a contact that happens to be such a word is never
+    hijacked; pointer-nouns ("raqam", "egasi") are never saved names, so they
+    match with or without a demonstrative.
     """
     toks = [normalize_name(t) for t in (name or "").split()]
     toks = [t for t in toks if t]
@@ -741,6 +759,10 @@ def _refers_to_last_contact(name: str) -> bool:
             continue
         stem = _ref_stem(t)
         if stem in _REF_SOLO_NOUNS:
+            continue
+        # Referential pointer-nouns ("raqam", "egasi", "ro'yxat") stand alone —
+        # they are never a saved name, so no demonstrative is required.
+        if stem in _REF_REFERENT_NOUNS or t in _REF_REFERENT_NOUNS:
             continue
         if has_dem and (stem in _REF_PERSON_NOUNS or t in _REF_PERSON_NOUNS):
             continue

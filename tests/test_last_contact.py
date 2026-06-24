@@ -59,6 +59,16 @@ def test_refers_to_last_contact_rejects_real_names():
         assert not _refers_to_last_contact(phrase), phrase
 
 
+def test_refers_to_last_contact_matches_referent_phrases():
+    # Pointer-nouns name nobody — they are a vague reference, with or without a
+    # leading demonstrative. These must NOT be fuzzy-searched as contact names.
+    for phrase in (
+        "shu raqam egasiga", "raqam egasiga", "shu ro'yxatdagi",
+        "anavi nomer", "u raqam egasi", "shu raqamdagi",
+    ):
+        assert _refers_to_last_contact(phrase), phrase
+
+
 def test_is_contact_reference_treats_empty_as_reference():
     assert _is_contact_reference("") is True
     assert _is_contact_reference("   ") is True
@@ -144,3 +154,19 @@ async def test_pronoun_without_memory_asks_for_name(registry):
     # No contact named yet this session -> a pronoun cannot be resolved.
     result = await _send_voice(registry, "unga", "salom")
     assert "aniqlay olmadim" in result.text
+
+
+async def test_referent_phrase_asks_for_name_not_garbage(registry):
+    """"Shu raqam egasiga" must ask for the name, NOT fuzzy-match "shu"->namesakes.
+
+    A "Shuxrat"-style contact whose name embeds "shu" must never surface as a
+    candidate for the referential phrase (the reported bug).
+    """
+    async with registry.session() as session:
+        await person_repo.upsert_telegram_contact(
+            session, telegram_user_id=901, display_name="Shuxrat aka"
+        )
+    result = await _send_voice(registry, "Shu raqam egasiga", "salom")
+    assert "aniqlay olmadim" in result.text
+    assert "Shuxrat" not in result.text
+    assert "kontakt topildi" not in result.text
