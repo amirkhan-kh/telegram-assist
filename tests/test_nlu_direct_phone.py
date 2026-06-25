@@ -24,6 +24,14 @@ def test_direct_phone_send_preserves_spaced_phone_digits():
     assert routed.params.content == "Salom"
 
 
+def test_direct_phone_send_handles_misheard_raqamiga_suffix():
+    routed = _direct_phone_send("+998916566533 raqmiga salom deb xabar yubor")
+
+    assert routed is not None
+    assert routed.params.recipient_name == "+998916566533"
+    assert routed.params.content == "salom"
+
+
 def test_direct_phone_send_ignores_meta_log_check_text():
     assert (
         _direct_phone_send(

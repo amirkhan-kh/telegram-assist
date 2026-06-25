@@ -38,7 +38,7 @@ _TRAILING_SEND_RE = re.compile(
     re.IGNORECASE,
 )
 _LEADING_RECIPIENT_SUFFIX_RE = re.compile(
-    r"^\s*(?:raqam(?:i)?ga|nomer(?:i)?ga|telefon(?:i)?ga|ga|ka|qa)\b[,:\s-]*",
+    r"^\s*(?:raq[ai]?m(?:i)?ga|nomer(?:i)?ga|telefon(?:i)?ga|ga|ka|qa)\b[,:\s-]*",
     re.IGNORECASE,
 )
 _LEADING_DELIVERY_RE = re.compile(
