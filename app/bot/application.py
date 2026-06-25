@@ -25,6 +25,7 @@ from app.bot.handlers import (
     on_callback,
     on_error,
     on_help,
+    on_contact,
     on_photo,
     on_start,
     on_text,
@@ -57,6 +58,9 @@ def build_application(registry: ServiceRegistry) -> Application:
     )
     application.add_handler(
         MessageHandler(owner_only & (filters.VOICE | filters.AUDIO), on_voice)
+    )
+    application.add_handler(
+        MessageHandler(owner_only & filters.CONTACT, on_contact)
     )
     # Document photos (passport / inspection / insurance) — owner chat only.
     application.add_handler(

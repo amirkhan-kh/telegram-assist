@@ -19,7 +19,9 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import shutil
 import tempfile
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
@@ -36,7 +38,9 @@ from app.brain.intents import (
     ListFinance,
     ListImportantDates,
     ShowCalendar,
+    SendMessage,
 )
+from app.brain.translit import normalize_name
 from app.logging_conf import get_logger
 from app.repositories import person_repo
 from app.services import audio_service
@@ -45,6 +49,7 @@ from app.services.dispatcher import (
     clear_pending_outbound,
     clear_pending_time,
     complete_outbound,
+    complete_phone_save,
     delete_calendar_event,
     delete_list_item,
     dispatch,
@@ -187,6 +192,17 @@ _PD_PHOTO_REVIEW: dict[int, dict] = {}
 _PD_PENDING: dict[int, str] = {}
 _PD_PHOTO_LINK: dict[int, int] = {}
 
+
+@dataclass
+class _SharedPhone:
+    """A phone/contact the owner just sent, awaiting a message body/command."""
+
+    phone: str
+    display_name: str
+
+
+_SHARED_PHONE: dict[int, _SharedPhone] = {}
+
 # All quick-menu labels — a menu tap cancels a pending date entry (no trap).
 _MENU_LABELS = frozenset(
     {
@@ -214,6 +230,38 @@ _REMIND_NEW_PROMPT = (
     "• «har dushanba ertalab 8 da hisobot»\n"
     "• «oy oxirida to'lovni esla»"
 )
+
+
+def _compact_phone(raw: str) -> str:
+    digits = re.sub(r"\D", "", raw or "")
+    return f"+{digits}" if digits else ""
+
+
+def _shared_phone_refers(text: str) -> bool:
+    norm = normalize_name(text or "")
+    return any(
+        phrase in norm
+        for phrase in (
+            "shu raqam",
+            "shu nomer",
+            "shu telefon",
+            "shu kontakt",
+            "bu raqam",
+            "bu nomer",
+            "bu kontakt",
+            "unga",
+            "shunga",
+            "oshanga",
+        )
+    )
+
+
+def _looks_like_send_instruction(text: str) -> bool:
+    return re.search(
+        r"\b(?:xabar|yubor|jo['‘’ʻʼ`]?nat|yoz|ayt)\b",
+        text or "",
+        re.IGNORECASE,
+    ) is not None
 
 
 async def _handle_remind_callback(registry: ServiceRegistry, query: object) -> None:
@@ -269,6 +317,23 @@ async def _handle_outbound_callback(registry: ServiceRegistry, query: object) ->
             parse_mode=result.parse_mode,
             reply_markup=result.reply_markup,
         )
+
+
+async def _handle_savephone_callback(registry: ServiceRegistry, query: object) -> None:
+    """Handle the post-send 'save this phone?' choice."""
+    data = query.data  # type: ignore[attr-defined]
+    keep = data.endswith(":yes")
+    result = await complete_phone_save(
+        registry, registry.settings.owner_chat_id, keep
+    )
+    await query.answer("Tayyor")  # type: ignore[attr-defined]
+    message = query.message  # type: ignore[attr-defined]
+    if message is None:
+        return
+    try:
+        await query.edit_message_text(result.text)  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        await message.reply_text(result.text)
 
 
 async def _handle_tday_callback(registry: ServiceRegistry, query: object) -> None:
@@ -816,7 +881,7 @@ async def _safe_edit(
             pass
 
 
-async def _rate_limit_on(message: Message, exc: Exception) -> None:
+async def _rate_limit_on(message: Message, exc: Exception, retry=None) -> None:
     """Turn ``message`` into a live countdown to when the AI limit reopens.
 
     Per-minute limits tick the message down to zero, then to 'try again'; a
@@ -841,10 +906,25 @@ async def _rate_limit_on(message: Message, exc: Exception) -> None:
                 await message.edit_text(f"{base} {_fmt_dur(remaining)}")
             except Exception:  # noqa: BLE001 — edit may fail (unchanged / limits)
                 return
+        if retry is None:
+            try:
+                await message.edit_text("✅ Limit tiklandi — endi qayta urinib ko'ring.")
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        await _safe_edit(message, "✅ Limit tiklandi — avtomatik qayta urinib ko'ryapman…")
         try:
-            await message.edit_text("✅ Limit tiklandi — endi qayta urinib ko'ring.")
-        except Exception:  # noqa: BLE001
-            pass
+            result = await asyncio.wait_for(retry(), timeout=_RESPOND_TIMEOUT)
+        except Exception as retry_exc:  # noqa: BLE001
+            logger.warning("bot.rate_limit.auto_retry_failed", error=str(retry_exc))
+            await _safe_edit(message, _error_reply(retry_exc))
+            return
+        if result is None:
+            await _safe_edit(message, _GENERIC_ERROR)
+            return
+        await _safe_edit(
+            message, result.text, result.parse_mode, result.reply_markup
+        )
 
     task = asyncio.create_task(_tick())
     _BG_TASKS.add(task)
@@ -871,7 +951,7 @@ async def _respond(message: Message, run, *, loading: str = "⏳ Bajarilmoqda…
     except Exception as exc:  # noqa: BLE001 — a failure must never crash the loop
         logger.exception("bot.respond.failed")
         if _is_rate_limit(exc):
-            await _rate_limit_on(placeholder, exc)
+            await _rate_limit_on(placeholder, exc, retry=run)
         else:
             await _safe_edit(placeholder, _error_reply(exc))
         return
@@ -1001,6 +1081,30 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Echo what we heard so the owner can catch a mis-hearing, then act on it.
     await message.reply_text(f"🎙 «{text}»")
     await _route_and_reply(registry, message, text)
+
+
+async def on_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Remember a shared Telegram contact/phone for the next send command."""
+    registry = _registry(context)
+    message = update.effective_message
+    if message is None or message.contact is None:
+        return
+    if await _morning_gate_blocks(registry, message):
+        return
+    contact = message.contact
+    phone = _compact_phone(contact.phone_number)
+    if not phone:
+        await message.reply_text("Kontakt ichida telefon raqam topilmadi.")
+        return
+    name = " ".join(
+        p for p in (contact.first_name, contact.last_name) if p
+    ).strip() or phone
+    _SHARED_PHONE[registry.settings.owner_chat_id] = _SharedPhone(
+        phone=phone, display_name=name
+    )
+    await message.reply_text(
+        f"📞 {name} ({phone}) qabul qilindi. Nima yuboray?"
+    )
 
 
 async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1335,6 +1439,46 @@ async def _route_and_reply(
         )
         return
 
+    shared = _SHARED_PHONE.get(owner_key)
+    if shared is not None:
+        if text in _MENU_LABELS:
+            _SHARED_PHONE.pop(owner_key, None)
+        elif not _looks_like_send_instruction(text):
+            _SHARED_PHONE.pop(owner_key, None)
+            await _respond(
+                message,
+                lambda: dispatch(
+                    registry,
+                    RoutedIntent(
+                        "send_message",
+                        SendMessage(recipient_name=shared.phone, content=text),
+                        {},
+                    ),
+                    now=datetime.now(UTC),
+                ),
+                loading="⏳ Tayyorlanmoqda…",
+            )
+            return
+        elif _shared_phone_refers(text):
+            nlu = registry.nlu_service
+            if nlu is None or not nlu.available():
+                await message.reply_text(_NO_NLU)
+                return
+
+            async def _shared_route() -> object:
+                now = datetime.now(UTC)
+                now_iso = now.astimezone(
+                    ZoneInfo(registry.settings.user_timezone)
+                ).isoformat()
+                routed = await nlu.route(text, now_iso=now_iso)
+                if routed.name in ("send_message", "schedule_message"):
+                    setattr(routed.params, "recipient_name", shared.phone)
+                    _SHARED_PHONE.pop(owner_key, None)
+                return await dispatch(registry, routed, now=now)
+
+            await _respond(message, _shared_route, loading="⏳ Bajarilmoqda…")
+            return
+
     nlu = registry.nlu_service
     if nlu is None or not nlu.available():
         await message.reply_text(_NO_NLU)
@@ -1362,6 +1506,8 @@ async def _transcribe_message(
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "voice.ogg")
             await tg_file.download_to_drive(path)
+            if registry.settings.stt_debug:
+                _dump_stt_audio(path, message)
             # Denoise/band-limit the raw clip first so noisy real-world audio
             # (moving car, wind, street) reaches STT clean; fall back to the raw
             # file when ffmpeg/preprocessing is unavailable.
@@ -1379,6 +1525,23 @@ async def _transcribe_message(
     except Exception as exc:  # noqa: BLE001 — degrade gracefully on download/STT error
         logger.warning("bot.transcribe.failed", error=str(exc))
         return ""
+
+
+def _dump_stt_audio(src_path: str, message: Message) -> None:
+    """TEMP debug (STT_DEBUG=true): persist the raw inbound voice for analysis.
+
+    Copies the downloaded clip to the persistent media volume so the exact real
+    audio can be pulled off the server and run through the STT comparison battery.
+    Best-effort: never breaks the transcription flow.
+    """
+    try:
+        dbg_dir = "data/media/stt_debug"
+        os.makedirs(dbg_dir, exist_ok=True)
+        dst = os.path.join(dbg_dir, f"voice_{getattr(message, 'message_id', 'x')}.ogg")
+        shutil.copyfile(src_path, dst)
+        logger.info("bot.stt_debug.saved", path=dst)
+    except Exception as exc:  # noqa: BLE001 — debug must never break the flow
+        logger.warning("bot.stt_debug.failed", error=str(exc))
 
 
 # How many contact names to feed STT as spelling hints. A large synced phonebook
@@ -1447,6 +1610,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     if data.startswith("out:"):
         await _handle_outbound_callback(registry, query)
+        return
+    if data.startswith("savephone:"):
+        await _handle_savephone_callback(registry, query)
         return
     if data.startswith("pick:"):
         await _handle_pick_callback(registry, query)

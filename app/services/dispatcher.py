@@ -41,6 +41,7 @@ from app.bot.keyboards import (
     debt_settle_keyboard,
     list_delete_keyboard,
     outbound_choice_keyboard,
+    phone_save_keyboard,
     time_day_keyboard,
     undo_button,
 )
@@ -152,6 +153,30 @@ def has_pending_outbound(owner_key: int) -> bool:
 def clear_pending_outbound(owner_key: int) -> None:
     """Drop any message awaiting a voice/text choice (e.g. the owner moved on)."""
     _PENDING_OUT.pop(owner_key, None)
+
+
+@dataclass
+class _PendingPhoneSave:
+    """A raw phone was imported for sending; ask whether to keep it."""
+
+    person_id: int
+    phone: str
+    display_name: str
+
+
+_PENDING_PHONE_SAVE: dict[int, _PendingPhoneSave] = {}
+
+
+async def complete_phone_save(
+    registry: ServiceRegistry, owner_key: int, keep: bool
+) -> DispatchResult:
+    """Handle the post-send 'save this new number?' button."""
+    pending = _PENDING_PHONE_SAVE.pop(owner_key, None)
+    if pending is None:
+        return DispatchResult("Bu so'rov eskirgan.")
+    if keep:
+        return DispatchResult(f"✅ {pending.phone} saqlab qo'yildi.")
+    return DispatchResult("Mayli, bu raqamni alohida saqlamayman.")
 
 
 # ── pending compose: a contact picked from a "show contacts" list, awaiting the
@@ -571,6 +596,10 @@ async def complete_outbound(
     text = f"{pending.display_name}ga xabar yuborildi."
     text += _delivery_note(registry, mode)
     text += _test_mode_note(registry, pending.is_owner)
+    phone_save = _PENDING_PHONE_SAVE.get(owner_key)
+    if phone_save is not None and phone_save.person_id == pending.recipient_id:
+        text += "\n\nBu yangi raqamni saqlab qo'yaymi?"
+        return DispatchResult(text, reply_markup=phone_save_keyboard())
     return DispatchResult(text)
 
 
@@ -610,6 +639,11 @@ def _looks_like_phone(text: str) -> bool:
     if re.fullmatch(r"[+()\d\s-]+", stripped) is None:
         return False
     return len(re.sub(r"\D", "", stripped)) >= 7
+
+
+def _phone_digits(text: str) -> str:
+    """Digit-only phone key used for exact raw-number recipient handling."""
+    return re.sub(r"\D", "", text or "")
 
 
 def _candidate_detail(candidate: ContactMatch) -> str:
@@ -1026,6 +1060,9 @@ async def _resolve_recipient(
     yet (e.g. a contact added after startup), pull the owner's address book once
     via the userbot and retry — so freshly added contacts still resolve.
     """
+    if _looks_like_phone(name):
+        return await _resolve_phone_recipient(registry, name)
+
     async with registry.session() as session:
         resolved = await resolve_contact(session, name)
     if resolved is not None:
@@ -1043,12 +1080,84 @@ async def _resolve_recipient(
     if resolved is not None:
         return resolved
 
-    # Still nothing. If the owner addressed a raw phone number (not a saved
-    # contact), import it as a Telegram contact so a brand-new number can be
-    # messaged, then resolve to that freshly created person.
-    if _looks_like_phone(name):
-        return await _import_phone_recipient(registry, name)
     return None
+
+
+async def _resolve_phone_recipient(
+    registry: ServiceRegistry, phone: str
+) -> ContactMatch | Disambiguation | None:
+    """Resolve a raw phone without letting partial search rewrite the number.
+
+    Full international numbers must match a saved contact exactly. Short/local
+    numbers may match a unique saved-phone suffix. If no saved contact matches,
+    import the exact raw phone so the owner-said digits are preserved.
+    """
+
+    async def _lookup_saved() -> ContactMatch | Disambiguation | None:
+        query_digits = _phone_digits(phone)
+        if len(query_digits) < 7:
+            return None
+        allow_suffix = not phone.strip().startswith("+") and len(query_digits) <= 10
+        async with registry.session() as session:
+            people = await person_repo.all_people(session)
+        exact = [p for p in people if _phone_digits(p.phone) == query_digits]
+        if exact:
+            logger.info(
+                "dispatch.phone.exact_match",
+                phone=phone,
+                digits=query_digits,
+                count=len(exact),
+            )
+            if len(exact) == 1:
+                return _match_from_person(exact[0])
+            return Disambiguation([_match_from_person(p) for p in exact])
+        if allow_suffix:
+            suffix = [
+                p
+                for p in people
+                if (saved := _phone_digits(p.phone)) and saved.endswith(query_digits)
+            ]
+            if len(suffix) == 1:
+                logger.info(
+                    "dispatch.phone.suffix_match",
+                    phone=phone,
+                    digits=query_digits,
+                    person_id=suffix[0].id,
+                )
+                return _match_from_person(suffix[0])
+            if len(suffix) > 1:
+                logger.info(
+                    "dispatch.phone.suffix_disambiguation",
+                    phone=phone,
+                    digits=query_digits,
+                    count=len(suffix),
+                )
+                return Disambiguation([_match_from_person(p) for p in suffix])
+        return None
+
+    logger.info("dispatch.phone.resolve_start", phone=phone, digits=_phone_digits(phone))
+    resolved = await _lookup_saved()
+    if resolved is not None:
+        return resolved
+    if registry.userbot is None:
+        logger.info("dispatch.phone.no_userbot", phone=phone)
+        return None
+
+    from app.userbot.contacts import sync_contacts
+
+    await sync_contacts(registry.userbot, registry)
+    resolved = await _lookup_saved()
+    if resolved is not None:
+        return resolved
+    logger.info("dispatch.phone.import", phone=phone, digits=_phone_digits(phone))
+    imported = await _import_phone_recipient(registry, phone)
+    if imported is not None:
+        _PENDING_PHONE_SAVE[registry.settings.owner_chat_id] = _PendingPhoneSave(
+            person_id=imported.person_id,
+            phone=phone,
+            display_name=imported.display_name,
+        )
+    return imported
 
 
 async def _import_phone_recipient(
@@ -1364,6 +1473,14 @@ async def _send_message(
             f"{resolved.display_name} uchun Telegram identifikatori yo'q, "
             "xabar yuborib bo'lmadi."
         )
+    logger.info(
+        "dispatch.send_message.resolved",
+        requested=params.recipient_name,
+        person_id=resolved.person_id,
+        chat_id=resolved.chat_id,
+        display_name=resolved.display_name,
+        phone=resolved.phone,
+    )
 
     # Honour an explicit "ovozli"/"matn" if the owner said one; otherwise let
     # them pick via buttons. Either way the send runs through complete_outbound.

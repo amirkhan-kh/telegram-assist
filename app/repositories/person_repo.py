@@ -100,6 +100,11 @@ async def get_by_telegram_user_id(
     return result.scalars().first()
 
 
+async def all_people(session: AsyncSession) -> list[Person]:
+    """Return all known people."""
+    return list((await session.execute(select(Person))).scalars().all())
+
+
 def _name_variants(person: Person) -> set[str]:
     """Normalized comparison keys for a person: the SAVED NAME, whole + per word.
 

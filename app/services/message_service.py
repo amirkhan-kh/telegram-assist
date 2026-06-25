@@ -148,6 +148,14 @@ class MessageService:
             if settings.test_mode and not is_to_owner:
                 notifier = self.registry.notification_service
                 text = f"[TEST -> {recipient_name}]\n{content}"
+                logger.info(
+                    "message.send.test_redirect",
+                    message_id=message_id,
+                    recipient_id=recipient_id,
+                    chat_id=chat,
+                    recipient_name=recipient_name,
+                    delivery=getattr(delivery, "value", delivery),
+                )
                 if notifier is not None:
                     await notifier.notify_owner(text)
                     # Preview the real voice note to the owner so the cloned
@@ -164,6 +172,14 @@ class MessageService:
                 sender = self.registry.sender
                 if sender is None or chat is None:
                     raise RuntimeError("No sender or unresolved recipient")
+                logger.info(
+                    "message.send.deliver",
+                    message_id=message_id,
+                    recipient_id=recipient_id,
+                    chat_id=chat,
+                    recipient_name=recipient_name,
+                    delivery=getattr(delivery, "value", delivery),
+                )
                 await sender.send(chat, content, delivery)
         except Exception as exc:  # noqa: BLE001 - record failure, never raise out
             logger.warning(
@@ -175,4 +191,10 @@ class MessageService:
 
         async with self.registry.session() as session:
             await message_repo.mark_sent(session, message_id)
-        logger.info("message.sent", message_id=message_id)
+        logger.info(
+            "message.sent",
+            message_id=message_id,
+            recipient_id=recipient_id,
+            chat_id=chat,
+            recipient_name=recipient_name,
+        )

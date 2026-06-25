@@ -84,6 +84,9 @@ class Settings(BaseSettings):
     # Regional endpoint for Chirp 2. Uzbek + chirp_2 availability is region-
     # specific; if a region rejects the language/model, try "global".
     google_stt_location: str = "us-central1"
+    # TEMP diagnostics: when true, persist each inbound voice clip under
+    # data/media/stt_debug/ so real audio can be pulled and analysed. Off in prod.
+    stt_debug: bool = False
 
     # ── Voice (ElevenLabs) ────────────────────────────────────────────────
     elevenlabs_api_key: str = ""

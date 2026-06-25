@@ -41,3 +41,4 @@ media/
 .DS_Store
 .idea/
 .vscode/
+.aider*

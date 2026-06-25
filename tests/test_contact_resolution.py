@@ -128,6 +128,64 @@ async def test_unsaved_phone_is_imported_then_sent(registry, monkeypatch):
     assert person is not None and person.display_name == "Yangi Raqam"
 
 
+async def test_unsaved_phone_prompts_save_after_delivery(registry, monkeypatch):
+    registry.userbot = object()
+
+    async def _no_sync(*_a, **_k):
+        return 0
+
+    async def _fake_import(_client, phone):
+        return {"user_id": 9998, "name": "Yangi Raqam", "username": None, "phone": phone}
+
+    monkeypatch.setattr("app.userbot.contacts.sync_contacts", _no_sync)
+    monkeypatch.setattr("app.userbot.contacts.import_phone_contact", _fake_import)
+
+    owner_key = registry.settings.owner_chat_id
+    res = await dispatch(registry, _send("+998999998800"), now=_now())
+    assert "Qanday yuboray" in res.text
+
+    out = await dispatcher.complete_outbound(registry, owner_key, SendMode.text)
+
+    assert "xabar yuborildi" in out.text
+    assert "saqlab qo'yaymi" in out.text
+    payloads = [b.callback_data for row in out.reply_markup.inline_keyboard for b in row]
+    assert payloads == ["savephone:yes", "savephone:no"]
+
+
+async def test_full_raw_phone_is_not_rewritten_to_another_saved_contact(
+    registry, monkeypatch
+):
+    registry.userbot = object()
+    async with registry.session() as session:
+        await person_repo.upsert_telegram_contact(
+            session,
+            telegram_user_id=909902440,
+            display_name="Wrong Saved Contact",
+            phone="+998909902440",
+        )
+
+    async def _no_sync(*_a, **_k):
+        return 0
+
+    async def _fake_import(_client, phone):
+        assert phone == "+998908408407"
+        return {
+            "user_id": 8408407,
+            "name": "Exact Raw Phone",
+            "username": None,
+            "phone": phone,
+        }
+
+    monkeypatch.setattr("app.userbot.contacts.sync_contacts", _no_sync)
+    monkeypatch.setattr("app.userbot.contacts.import_phone_contact", _fake_import)
+
+    res = await dispatch(registry, _send("+998908408407"), now=_now())
+
+    assert "Qanday yuboray" in res.text
+    assert "Exact Raw Phone" in res.text
+    assert "Wrong Saved Contact" not in res.text
+
+
 async def test_unsaved_phone_not_on_telegram_reports_not_found(registry, monkeypatch):
     registry.userbot = object()
 

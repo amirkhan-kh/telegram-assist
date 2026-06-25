@@ -224,6 +224,18 @@ def outbound_choice_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def phone_save_keyboard() -> InlineKeyboardMarkup:
+    """Ask whether to keep a newly messaged raw phone in contacts."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                _Btn("✅ Saqlab qo'y", callback_data="savephone:yes"),
+                _Btn("❌ Saqlanmasin", callback_data="savephone:no"),
+            ]
+        ]
+    )
+
+
 # ── contact disambiguation (several namesakes -> pick one) ────────────────────
 # Simple ``pick:<person_id>`` payload handled directly in on_callback. The id
 # (not the 1-based index) travels in the payload so the choice is unambiguous.

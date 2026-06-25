@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from app.bot.handlers import _menu_intent, _respond
 from app.services.dispatcher import DispatchResult
 
@@ -82,3 +84,30 @@ async def test_respond_handles_error_gracefully():
     # The loading placeholder is edited with a user-facing error (not crashed).
     assert message.sent.edits  # something was written
     assert "Xatolik" in message.sent.edits[-1][0]
+
+
+async def test_respond_auto_retries_after_rate_limit(monkeypatch):
+    from app.bot import handlers
+
+    message = _FakeMessage()
+    calls = 0
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(handlers, "_retry_after_seconds", lambda _exc: 1)
+    monkeypatch.setattr(handlers.asyncio, "sleep", fast_sleep)
+
+    async def run() -> DispatchResult:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("429 RESOURCE_EXHAUSTED retryDelay: 1s")
+        return DispatchResult("Qayta urinish natijasi")
+
+    await _respond(message, run)
+    await real_sleep(0)
+
+    assert calls == 2
+    assert message.sent.edits[-1] == ("Qayta urinish natijasi", None)
