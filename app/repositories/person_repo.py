@@ -256,6 +256,33 @@ async def create(session: AsyncSession, **fields: Any) -> Person:
     return person
 
 
+async def rename(session: AsyncSession, person_id: int, display_name: str) -> Person | None:
+    """Rename a person/contact."""
+    person = await get_by_id(session, person_id)
+    if person is None:
+        return None
+    name = (display_name or "").strip()
+    if not name:
+        return person
+    person.display_name = name
+    await session.flush()
+    await session.refresh(person)
+    return person
+
+
+async def forget_phone(session: AsyncSession, person_id: int) -> Person | None:
+    """Forget a raw phone mapping while keeping historical message references."""
+    person = await get_by_id(session, person_id)
+    if person is None:
+        return None
+    person.phone = None
+    if _digits(person.display_name) and not person.telegram_username:
+        person.display_name = f"Saqlanmagan raqam {person.id}"
+    await session.flush()
+    await session.refresh(person)
+    return person
+
+
 async def upsert_telegram_contact(
     session: AsyncSession,
     *,

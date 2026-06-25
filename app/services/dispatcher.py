@@ -162,6 +162,7 @@ class _PendingPhoneSave:
     person_id: int
     phone: str
     display_name: str
+    awaiting_name: bool = False
 
 
 _PENDING_PHONE_SAVE: dict[int, _PendingPhoneSave] = {}
@@ -171,12 +172,41 @@ async def complete_phone_save(
     registry: ServiceRegistry, owner_key: int, keep: bool
 ) -> DispatchResult:
     """Handle the post-send 'save this new number?' button."""
-    pending = _PENDING_PHONE_SAVE.pop(owner_key, None)
+    pending = _PENDING_PHONE_SAVE.get(owner_key)
     if pending is None:
         return DispatchResult("Bu so'rov eskirgan.")
     if keep:
-        return DispatchResult(f"✅ {pending.phone} saqlab qo'yildi.")
+        pending.awaiting_name = True
+        return DispatchResult(
+            f"Kontakt nomini yozing. Masalan: «Ali aka»\n📞 {pending.phone}"
+        )
+    _PENDING_PHONE_SAVE.pop(owner_key, None)
+    async with registry.session() as session:
+        await person_repo.forget_phone(session, pending.person_id)
     return DispatchResult("Mayli, bu raqamni alohida saqlamayman.")
+
+
+def has_pending_phone_name(owner_key: int) -> bool:
+    """True when the bot is waiting for a name for a newly sent raw phone."""
+    pending = _PENDING_PHONE_SAVE.get(owner_key)
+    return pending is not None and pending.awaiting_name
+
+
+async def complete_phone_name(
+    registry: ServiceRegistry, owner_key: int, name: str
+) -> DispatchResult:
+    """Save the typed display name for a pending raw phone."""
+    pending = _PENDING_PHONE_SAVE.pop(owner_key, None)
+    if pending is None or not pending.awaiting_name:
+        return DispatchResult("Bu so'rov eskirgan.")
+    clean = (name or "").strip()
+    if not clean:
+        pending.awaiting_name = True
+        _PENDING_PHONE_SAVE[owner_key] = pending
+        return DispatchResult("Kontakt nomi bo'sh. Iltimos, nomini yozing.")
+    async with registry.session() as session:
+        await person_repo.rename(session, pending.person_id, clean)
+    return DispatchResult(f"✅ Kontakt saqlandi: {clean} — {pending.phone}")
 
 
 # ── pending compose: a contact picked from a "show contacts" list, awaiting the
@@ -646,6 +676,14 @@ def _phone_digits(text: str) -> str:
     return re.sub(r"\D", "", text or "")
 
 
+def _is_unnamed_phone_person(person: object) -> bool:
+    """True when a contact row is just a raw phone placeholder, not named."""
+    return bool(_phone_digits(getattr(person, "display_name", ""))) and (
+        _phone_digits(getattr(person, "display_name", ""))
+        == _phone_digits(getattr(person, "phone", ""))
+    )
+
+
 def _candidate_detail(candidate: ContactMatch) -> str:
     """A short distinguishing detail so identical names are tellable apart."""
     if candidate.phone:
@@ -1109,6 +1147,14 @@ async def _resolve_phone_recipient(
                 count=len(exact),
             )
             if len(exact) == 1:
+                if _is_unnamed_phone_person(exact[0]):
+                    _PENDING_PHONE_SAVE[registry.settings.owner_chat_id] = (
+                        _PendingPhoneSave(
+                            person_id=exact[0].id,
+                            phone=phone,
+                            display_name=exact[0].display_name,
+                        )
+                    )
                 return _match_from_person(exact[0])
             return Disambiguation([_match_from_person(p) for p in exact])
         if allow_suffix:

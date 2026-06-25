@@ -152,6 +152,53 @@ async def test_unsaved_phone_prompts_save_after_delivery(registry, monkeypatch):
     assert payloads == ["savephone:yes", "savephone:no"]
 
 
+async def test_unnamed_phone_contact_prompts_save_after_delivery(registry):
+    async with registry.session() as session:
+        person = await person_repo.upsert_telegram_contact(
+            session,
+            telegram_user_id=916566533,
+            display_name="+998916566533",
+            phone="998916566533",
+        )
+
+    owner_key = registry.settings.owner_chat_id
+    res = await dispatch(registry, _send("+998916566533"), now=_now())
+    assert "Qanday yuboray" in res.text
+
+    out = await dispatcher.complete_outbound(registry, owner_key, SendMode.text)
+    assert "saqlab qo'yaymi" in out.text
+
+    ask_name = await dispatcher.complete_phone_save(registry, owner_key, True)
+    assert "Kontakt nomini yozing" in ask_name.text
+    saved = await dispatcher.complete_phone_name(registry, owner_key, "Ali aka")
+    assert "Ali aka" in saved.text
+
+    async with registry.session() as session:
+        row = await person_repo.get_by_id(session, person.id)
+    assert row.display_name == "Ali aka"
+    assert row.phone == "998916566533"
+
+
+async def test_savephone_no_forgets_unnamed_phone(registry):
+    async with registry.session() as session:
+        person = await person_repo.upsert_telegram_contact(
+            session,
+            telegram_user_id=916566534,
+            display_name="+998916566534",
+            phone="998916566534",
+        )
+
+    owner_key = registry.settings.owner_chat_id
+    await dispatch(registry, _send("+998916566534"), now=_now())
+    await dispatcher.complete_outbound(registry, owner_key, SendMode.text)
+    done = await dispatcher.complete_phone_save(registry, owner_key, False)
+
+    assert "saqlamayman" in done.text
+    async with registry.session() as session:
+        row = await person_repo.get_by_id(session, person.id)
+    assert row.phone is None
+
+
 async def test_full_raw_phone_is_not_rewritten_to_another_saved_contact(
     registry, monkeypatch
 ):

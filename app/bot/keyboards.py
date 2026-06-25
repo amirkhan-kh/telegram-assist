@@ -229,7 +229,7 @@ def phone_save_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                _Btn("✅ Saqlab qo'y", callback_data="savephone:yes"),
+                _Btn("✅ Saqlansin", callback_data="savephone:yes"),
                 _Btn("❌ Saqlanmasin", callback_data="savephone:no"),
             ]
         ]

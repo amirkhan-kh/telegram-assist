@@ -49,6 +49,7 @@ from app.services.dispatcher import (
     clear_pending_outbound,
     clear_pending_time,
     complete_outbound,
+    complete_phone_name,
     complete_phone_save,
     delete_calendar_event,
     delete_list_item,
@@ -56,6 +57,7 @@ from app.services.dispatcher import (
     dispatch_compose,
     has_pending,
     has_pending_compose,
+    has_pending_phone_name,
     has_pending_time,
     resume_choice,
     resume_choice_pid,
@@ -1368,6 +1370,14 @@ async def _route_and_reply(
     the result (or a live countdown / error).
     """
     owner_key = registry.settings.owner_chat_id
+
+    if has_pending_phone_name(owner_key):
+        await _respond(
+            message,
+            lambda: complete_phone_name(registry, owner_key, text),
+            loading="⏳ Kontakt saqlanmoqda…",
+        )
+        return
 
     # A scheduling action is waiting for the owner to TYPE the time/date (the
     # day was/will be picked via buttons). Capture this message as that answer.
