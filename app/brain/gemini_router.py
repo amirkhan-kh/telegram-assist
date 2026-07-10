@@ -14,6 +14,7 @@ When no Gemini client is configured the router is built with a ``None`` client;
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 from app.brain.intent_router import INTENT_MODELS, RoutedIntent
@@ -34,6 +35,23 @@ _RETRY_BASE_DELAY = 1.0
 _CALL_TIMEOUT = 20.0
 
 
+def _schema_hint(model: type) -> str:
+    """Describe ``model``'s JSON shape in the prompt for the API-key path.
+
+    The AI-Studio (Gemini API-key) endpoint rejects our large intent-envelope as
+    a ``response_schema`` ("schema produces a constraint that has too many states
+    for serving"), while Vertex accepts it. So on the key path we DROP the schema
+    and instead spell out the exact JSON shape in the system prompt — schema TEXT
+    has no constrained-decoding limit — then validate the reply locally. Field
+    names/enums come straight from the same pydantic models, so nothing drifts.
+    """
+    return (
+        "\n\nReturn a JSON object matching EXACTLY this JSON Schema. Fill only the "
+        "sub-object whose key equals `intent` (leave every other sub-object null):\n"
+        + json.dumps(model.model_json_schema())
+    )
+
+
 class GeminiIntentRouter:
     """Wraps the Gemini client and routes utterances to intents."""
 
@@ -41,6 +59,9 @@ class GeminiIntentRouter:
         settings = get_settings()
         self.client = client if client is not None else get_gemini_client(settings)
         self.model = model or settings.gemini_nlu_model
+        # Vertex honours native ``response_schema``; the free API-key path can't
+        # (schema too large) and is guided by ``_schema_hint`` in the prompt.
+        self.use_response_schema = bool(settings.gemini_use_vertex)
 
     async def _generate_with_retry(self, *, contents: str, config: Any) -> Any:
         """Call Gemini, retrying transient 5xx (high-demand/internal) failures."""
@@ -95,12 +116,19 @@ class GeminiIntentRouter:
 
         from google.genai import types
 
-        config = types.GenerateContentConfig(
-            system_instruction=ROUTER_SYSTEM_STRUCTURED,
-            response_mime_type="application/json",
-            response_schema=NLUResult,
-            temperature=0,
-        )
+        if self.use_response_schema:
+            config = types.GenerateContentConfig(
+                system_instruction=ROUTER_SYSTEM_STRUCTURED,
+                response_mime_type="application/json",
+                response_schema=NLUResult,
+                temperature=0,
+            )
+        else:
+            config = types.GenerateContentConfig(
+                system_instruction=ROUTER_SYSTEM_STRUCTURED + _schema_hint(NLUResult),
+                response_mime_type="application/json",
+                temperature=0,
+            )
 
         response = await self._generate_with_retry(
             contents=f"<now>{now_iso}</now> {utterance}", config=config
@@ -167,12 +195,19 @@ class GeminiIntentRouter:
 
         from google.genai import types
 
-        config = types.GenerateContentConfig(
-            system_instruction=ROUTER_SYSTEM_MULTI,
-            response_mime_type="application/json",
-            response_schema=NLUMultiResult,
-            temperature=0,
-        )
+        if self.use_response_schema:
+            config = types.GenerateContentConfig(
+                system_instruction=ROUTER_SYSTEM_MULTI,
+                response_mime_type="application/json",
+                response_schema=NLUMultiResult,
+                temperature=0,
+            )
+        else:
+            config = types.GenerateContentConfig(
+                system_instruction=ROUTER_SYSTEM_MULTI + _schema_hint(NLUMultiResult),
+                response_mime_type="application/json",
+                temperature=0,
+            )
         response = await self._generate_with_retry(
             contents=f"<now>{now_iso}</now> {utterance}", config=config
         )
