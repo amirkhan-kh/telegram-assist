@@ -110,13 +110,16 @@ async def test_morning_briefing_empty_day(registry):
     assert "bo'sh" in text.lower()
 
 
-async def test_morning_plan_raises_and_clears_gate(registry):
-    registry.notification_service = _CapturingNotifier()
+async def test_morning_plan_delivers_without_gate(registry):
+    notifier = _CapturingNotifier()
+    registry.notification_service = notifier
     bs = registry.briefing_service
     assert await bs.is_morning_pending() is False
-    # Delivering the plan raises the confirmation gate.
+    # The morning plan is informational: it is delivered with NO «✅ Tasdiqlash»
+    # button and never raises the gate, so the owner can act immediately.
     await bs.run_morning()
-    assert await bs.is_morning_pending() is True
-    # Confirming lowers it again.
-    await bs.clear_morning_pending()
     assert await bs.is_morning_pending() is False
+    assert notifier.calls, "morning plan should be delivered"
+    text, reply_markup = notifier.calls[-1]
+    assert "Xayrli tong" in text
+    assert reply_markup is None  # no confirmation button

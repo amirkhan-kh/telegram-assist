@@ -76,12 +76,12 @@ async def test_callback_cancel_undoes_reminder(registry):
     assert row.status == ReminderStatus.cancelled
 
 
-async def test_confirm_button_clears_morning_gate(registry):
+async def test_confirm_button_acknowledges_morning_plan(registry):
     from app.bot.keyboards import KIND_BRIEFING, VERB_CONFIRM
 
-    await registry.briefing_service.set_morning_pending(datetime.now(UTC))
-    assert await registry.briefing_service.is_morning_pending() is True
-
+    # The morning gate is disabled (plan is informational), but tapping an old
+    # «✅ Tasdiqlash» button still gives a friendly acknowledgement and never
+    # leaves a pending gate.
     cb = Callback(VERB_CONFIRM, KIND_BRIEFING, 0)
     toast, _ = await _apply_callback(registry, cb, datetime.now(UTC))
 

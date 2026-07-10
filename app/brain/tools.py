@@ -821,6 +821,257 @@ def _show_calendar_tool() -> dict[str, Any]:
     }
 
 
+def _get_weather_tool() -> dict[str, Any]:
+    return {
+        "name": "get_weather",
+        "description": (
+            "Ob-havo prognozini ko'rsatish. 'bugun ob-havo', 'ertaga havo', "
+            "'hafta davomida ob-havo', 'Toshkentda ob-havo qanday'. / Show "
+            "weather forecast."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "location": {
+                    "type": ["string", "null"],
+                    "description": "Shahar/joy nomi; aytilmagan bo'lsa null.",
+                },
+                "scope": {
+                    "type": "string",
+                    "enum": ["today", "tomorrow", "week"],
+                    "description": "Prognoz oralig'i.",
+                },
+            },
+            "required": ["location", "scope"],
+            "additionalProperties": False,
+        },
+    }
+
+
+def _get_news_tool() -> dict[str, Any]:
+    return {
+        "name": "get_news",
+        "description": (
+            "Kunlik/so'nggi yangiliklarni ko'rsatish — Daryo.uz sarlavhalari, har "
+            "biri havola bilan. 'kun yangiliklari', 'bugungi yangiliklar', "
+            "'so'nggi yangiliklar', 'dunyo yangiliklari', 'yangiliklarni ko'rsat'. "
+            "MUAYYAN mavzu/voqea haqidagi savol bunга kirmaydi (u answer_question). "
+            "/ Show today's news headlines from Daryo.uz with links."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Nechta sarlavha (standart 8) / how many headlines.",
+                },
+            },
+            "required": ["limit"],
+            "additionalProperties": False,
+        },
+    }
+
+
+def _jarvis_briefing_tool() -> dict[str, Any]:
+    return {
+        "name": "jarvis_briefing",
+        "description": (
+            "Jarvis uslubida kunlik/haftalik qisqa briefing: reja + eslatmalar + "
+            "ob-havo. 'bugungi holatimni ayt', 'kunimni tahlil qil', "
+            "'haftalik rejamni ko'rib chiq'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "scope": {
+                    "type": "string",
+                    "enum": ["today", "week"],
+                    "description": "'today' bugun, 'week' hafta.",
+                },
+            },
+            "required": ["scope"],
+            "additionalProperties": False,
+        },
+    }
+
+
+def _search_chat_media_tool() -> dict[str, Any]:
+    return {
+        "name": "search_chat_media",
+        "description": (
+            "Telegram private chatdan media topib bot chatiga yuborish. "
+            "'Bobur menga yuborgan rasmlarni tashlab ber', 'Akmalga yuborgan "
+            "videolarimni top'. Userbot/Telethon kerak."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "contact_name": {"type": "string", "description": "Kontakt nomi."},
+                "media_type": {
+                    "type": "string",
+                    "enum": ["photo", "video", "document", "any"],
+                    "description": "Qaysi media turi.",
+                },
+                "direction": {
+                    "type": "string",
+                    "enum": ["incoming", "outgoing", "both"],
+                    "description": "incoming=u yuborgan, outgoing=men yuborgan.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Nechta media, odatda 5.",
+                },
+            },
+            "required": ["contact_name", "media_type", "direction", "limit"],
+            "additionalProperties": False,
+        },
+    }
+
+
+def _get_chat_messages_tool() -> dict[str, Any]:
+    return {
+        "name": "get_chat_messages",
+        "description": (
+            "Telegram private chatdan oxirgi matnli xabarlarni ko'rsatish. "
+            "'Asadbek menga yuborgan oxirgi xabarni yubor', 'Boburga yuborgan "
+            "oxirgi 3 ta xabarimni ko'rsat'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "contact_name": {"type": "string", "description": "Kontakt nomi."},
+                "direction": {
+                    "type": "string",
+                    "enum": ["incoming", "outgoing", "both"],
+                    "description": "incoming=u menga yuborgan, outgoing=men yuborgan.",
+                },
+                "scope": {
+                    "type": "string",
+                    "enum": ["recent", "today", "week"],
+                    "description": "Qaysi davr.",
+                },
+                "limit": {"type": "integer", "description": "Nechta xabar."},
+            },
+            "required": ["contact_name", "direction", "scope", "limit"],
+            "additionalProperties": False,
+        },
+    }
+
+
+def _summarize_chat_tool() -> dict[str, Any]:
+    return {
+        "name": "summarize_chat",
+        "description": (
+            "Telegram private chatdagi oxirgi yozishmalarni qisqacha tahlil qilish. "
+            "'Bobur bilan oxirgi gapimizni ayt', 'Akmal bilan bugungi chatni "
+            "xulosa qil'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "contact_name": {"type": "string", "description": "Kontakt nomi."},
+                "scope": {
+                    "type": "string",
+                    "enum": ["recent", "today", "week"],
+                    "description": "Qaysi davr.",
+                },
+                "limit": {"type": "integer", "description": "Xabarlar limiti."},
+            },
+            "required": ["contact_name", "scope", "limit"],
+            "additionalProperties": False,
+        },
+    }
+
+
+def _search_telegram_archive_tool() -> dict[str, Any]:
+    return {
+        "name": "search_telegram_archive",
+        "description": (
+            "Telegram account arxividan global qidiruv: private chatlar, group, "
+            "supergroup va kanallar ichidan matn, caption, ovozli/audio transcript "
+            "yoki video/rasm mazmuni bo'yicha xabar/media topib bot chatiga "
+            "yuborish. Misollar: 'Do'kondagilar 2025 gruppasida shahar ko'chasi "
+            "tasvirlangan videoni top', 'kimdir meni to'yga taklif qilgan ovozli "
+            "xabarni top', 'qaysidir kanalda kassa haqida yozilgan postni top'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Qidirilayotgan ma'no/tavsif/topic.",
+                },
+                "chat_name": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "Agar egasi group/kanal/chat nomini aytsa shu nom, aks holda null."
+                    ),
+                },
+                "chat_types": {
+                    "type": "string",
+                    "enum": ["all", "private", "groups", "channels"],
+                    "description": "Qayerdan qidirish.",
+                },
+                "media_type": {
+                    "type": "string",
+                    "enum": ["any", "text", "voice", "audio", "video", "photo", "document"],
+                    "description": "Qidirilayotgan xabar/media turi.",
+                },
+                "scope": {
+                    "type": "string",
+                    "enum": ["recent", "today", "week"],
+                    "description": "Qaysi davr.",
+                },
+                "limit": {"type": "integer", "description": "Nechta natija, odatda 3."},
+            },
+            "required": [
+                "query",
+                "chat_name",
+                "chat_types",
+                "media_type",
+                "scope",
+                "limit",
+            ],
+            "additionalProperties": False,
+        },
+    }
+
+
+def _answer_question_tool() -> dict[str, Any]:
+    return {
+        "name": "answer_question",
+        "description": (
+            "Umumiy savol-javob va suhbat — yuqoridagi hech bir amalga (xabar, "
+            "eslatma, uchrashuv, qarz, ro'yxat, kalendar, chat qidiruv...) MOS "
+            "kelmaganda ishlatiladi. Umumiy bilim, faktlar, yangiliklar, maslahat, "
+            "ta'rif, tarjima, hisob-kitob yoki oddiy suhbat. Bot 'Tushunmadim' "
+            "deyish o'rniga tabiiy, ovozbop o'zbekchada javob beradi. Javobi vaqt "
+            "o'tishi bilan o'zgaradigan (yangilik, narx, valyuta kursi, sport "
+            "natijasi, 'bugun/hozir' faktlari) bo'lsa needs_fresh_info=true qiling "
+            "— shunda javob jonli web qidiruv bilan asoslanadi. / General Q&A and "
+            "chit-chat fallback when no action intent fits."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Egasining savoli yoki mavzusi / the question or topic.",
+                },
+                "needs_fresh_info": {
+                    "type": "boolean",
+                    "description": (
+                        "Javob jonli/yangi ma'lumotga bog'liq bo'lsa true / true when "
+                        "the answer needs up-to-date info (news, prices, live facts)."
+                    ),
+                },
+            },
+            "required": ["query", "needs_fresh_info"],
+            "additionalProperties": False,
+        },
+    }
+
+
 def build_tools() -> list[dict[str, Any]]:
     """Return the full list of Anthropic tool definitions (fresh copies)."""
 
@@ -847,6 +1098,14 @@ def build_tools() -> list[dict[str, Any]]:
         _list_emails_tool(),
         _save_to_notion_tool(),
         _show_calendar_tool(),
+        _get_weather_tool(),
+        _get_news_tool(),
+        _jarvis_briefing_tool(),
+        _get_chat_messages_tool(),
+        _search_chat_media_tool(),
+        _summarize_chat_tool(),
+        _search_telegram_archive_tool(),
+        _answer_question_tool(),
     ]
 
 

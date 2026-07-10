@@ -53,6 +53,15 @@ class Settings(BaseSettings):
     # extra accuracy is worth the cost. Override per-task via the env if needed.
     gemini_nlu_model: str = "gemini-2.5-flash"
     gemini_stt_model: str = "gemini-2.5-flash"
+    # General Q&A / conversational fallback (answer_question intent). Full
+    # `flash` (not lite) — answers reason over the question and, when the owner
+    # needs live info, are grounded with Google Search (Vertex). Override per-env.
+    gemini_answer_model: str = "gemini-2.5-flash"
+    # Ground answer_question with live Google Search when the brain flags a
+    # question as needing fresh info (news, prices, current events). Uses Vertex
+    # grounding (no extra key). On any grounding error the answer degrades to an
+    # ungrounded model reply, so disabling this is always safe.
+    answer_web_grounding: bool = True
     # Gemini text-to-speech for outbound voice notes (no ElevenLabs needed).
     gemini_tts_model: str = "gemini-2.5-flash-preview-tts"
     # Prebuilt voice. Male: Charon, Puck, Fenrir, Orus, Enceladus, Iapetus.
@@ -87,6 +96,10 @@ class Settings(BaseSettings):
     # TEMP diagnostics: when true, persist each inbound voice clip under
     # data/media/stt_debug/ so real audio can be pulled and analysed. Off in prod.
     stt_debug: bool = False
+    # Verify short/ambiguous Chirp transcripts with Gemini before routing.
+    stt_verify_chirp: bool = True
+    stt_verify_max_chars: int = 90
+    stt_verify_timeout_seconds: float = 8.0
 
     # ── Voice (ElevenLabs) ────────────────────────────────────────────────
     elevenlabs_api_key: str = ""
@@ -133,6 +146,36 @@ class Settings(BaseSettings):
     digest_backfill_per_channel: int = 30
     digest_backfill_max_channels: int = 40
 
+    # ── Jarvis assistant tools ────────────────────────────────────────────
+    # Default city for weather/briefing requests when the owner does not name
+    # a location. Open-Meteo is used for weather, so no extra API key is needed.
+    jarvis_default_location: str = "Tashkent"
+    # Sources for the "kun yangiliklari" command — Uzbek-Latin news channels read
+    # via their public t.me/s web preview (the sites have no RSS/API). Aggregated,
+    # merged by recency. Comma-separated t.me usernames; add more to widen world
+    # coverage. Posts link back to the source article (daryo.uz, kun.uz…).
+    news_channels: str = "Daryo,kunuz"
+    jarvis_chat_media_limit: int = 10
+    jarvis_chat_summary_limit: int = 50
+    # Global Telegram archive search: private chats + groups + channels. These
+    # limits keep on-demand searches fast; deeper historical search should be
+    # handled by a background indexer.
+    jarvis_archive_dialog_limit: int = 1000
+    jarvis_archive_messages_per_dialog: int = 80
+    jarvis_archive_group_message_limit: int = 1000
+    jarvis_archive_channel_message_limit: int = 2000
+    # 0 means full private history: Telethon scans until the first/oldest message.
+    jarvis_archive_private_message_limit: int = 0
+    jarvis_archive_media_analyze_limit: int = 8
+    jarvis_archive_media_max_mb: int = 25
+    # Background local index for fast archive search. Startup remains non-blocking:
+    # every cycle indexes only a bounded slice, then continues later.
+    jarvis_archive_index_enabled: bool = True
+    jarvis_archive_index_dialog_limit: int = 250
+    jarvis_archive_index_messages_per_dialog: int = 40
+    jarvis_archive_index_max_messages_per_run: int = 800
+    jarvis_archive_index_interval_seconds: int = 600
+
     # ── Database ──────────────────────────────────────────────────────────
     database_url: str = "sqlite+aiosqlite:///./data/assistant.db"
 
@@ -162,6 +205,10 @@ class Settings(BaseSettings):
         "important_date_lookahead_days",
         "userbot_daily_send_limit",
         "userbot_min_seconds_between_sends",
+        "jarvis_archive_index_dialog_limit",
+        "jarvis_archive_index_messages_per_dialog",
+        "jarvis_archive_index_max_messages_per_run",
+        "jarvis_archive_index_interval_seconds",
         mode="before",
     )
     @classmethod

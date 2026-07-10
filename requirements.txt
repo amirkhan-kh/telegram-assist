@@ -35,6 +35,7 @@ google-auth-oauthlib==1.2.1
 httpx==0.28.1
 structlog==24.4.0
 tzdata==2024.2                        # IANA tz (Asia/Tashkent) inside slim image
+Pillow==10.4.0                        # GIF/frame processing for background removal
 
 # ── Dev / test ─────────────────────────────────────────────────────────
 pytest==8.3.4

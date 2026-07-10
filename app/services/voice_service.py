@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import uuid
+import wave
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -42,6 +44,45 @@ _STT_SYSTEM = (
     "so'z bilan to'ldiring; tasodifiy tovushni so'z deb yozmang. Maqsad — "
     "foydalanuvchi aytmoqchi bo'lgan gapni 95%+ aniqlikda, toza matn "
     "ko'rinishida qaytarish."
+)
+
+_STT_ACTION_RE = re.compile(
+    r"\b(?:yubor|jo['‘’ʻʼ`]?nat|yoz|ayt|eslat|qil|top|qidir|ko['‘’ʻʼ`]?rsat|"
+    r"chiqar|xulosa|ob[-\s]?havo|havo|reja|kalendar|taqvim|qarz|kontakt|"
+    r"xabar|salom|rasm|video|dokument|fayl|chat|yozishma)\b",
+    re.IGNORECASE,
+)
+_STT_COMMANDISH_RE = re.compile(
+    r"\b(?:ga|ka|qa|menga|unga|shunga|hozir|ertaga|soat|xabar|salom|yubor|"
+    r"ayt|yoz|miting|meeting|uchrashuv)\b",
+    re.IGNORECASE,
+)
+_STT_SHORT_REF_RE = re.compile(
+    r"\b(?:ha|shunga|shuga|unga|shu\s+odamga|shu\s+kontaktga)\b",
+    re.IGNORECASE,
+)
+_STT_SALOM_MISHEAR_RE = re.compile(
+    r"\bsalom\s+berib\s+(?:o['‘’ʻʼ`]?tdik|utdik|o['‘’ʻʼ`]?tdi|utdi)\b",
+    re.IGNORECASE,
+)
+_STT_CONTACT_HALLUCINATION_RE = re.compile(
+    r"\b(?:aka|opa|buva|bobo|yuksalish)\b", re.IGNORECASE
+)
+_STT_INITIALS_LIKE_RE = re.compile(r"\b[A-Za-z]\.\s*[A-Za-z]\b")
+_STT_TOKEN_RE = re.compile(r"[A-Za-zʻʼ‘’`']+")
+_STT_COMMAND_HINTS = (
+    "Agar audioda 'shunga salom deb yubor', 'shu odamga salom deb yubor', "
+    "'unga salom deb yubor' kabi buyruq eshitilsa, aynan shunday yoz. "
+    "'salom deb yubor' iborasini 'salom berib o'tdik' deb o'zgartirma."
+)
+_STT_HINT_LEAK_PHRASES = (
+    "shunga salom deb yubor",
+    "shu odamga salom deb yubor",
+    "shu kontaktga salom deb yubor",
+    "unga salom deb yubor",
+    "yozishmalarni xulosa qil",
+    "oxirgi xabarni yubor",
+    "oxirgi rasmni yubor",
 )
 
 
@@ -268,6 +309,21 @@ class VoiceService:
                     google_stt.transcribe_chirp_sync, self.settings, data, hint_names
                 )
                 if text:
+                    text = self._repair_stt_text(text)
+                    if self._should_verify_chirp(audio_path, text):
+                        gemini_text = self._repair_stt_text(
+                            await self._verify_chirp_with_gemini(
+                                audio_path, mime_type, hint_names
+                            )
+                        )
+                        chosen = self._choose_verified_stt(text, gemini_text)
+                        logger.info(
+                            "voice.stt.chirp_verified",
+                            chirp=text,
+                            gemini=gemini_text,
+                            chosen=chosen,
+                        )
+                        return chosen
                     return text
             except Exception as exc:  # noqa: BLE001 - degrade to ElevenLabs/Gemini
                 logger.warning("voice.stt.chirp_failed", error=str(exc))
@@ -300,7 +356,8 @@ class VoiceService:
             "- Fon shovqini, duduqlanish va tasodifiy tovushlarni e'tiborsiz "
             "qoldir.\n"
             "- Faqat aytilgan matnni qaytar — sarlavha, tirnoq yoki qo'shimcha "
-            "so'z qo'shma."
+            "so'z qo'shma.\n"
+            f"- {_STT_COMMAND_HINTS}"
         )
         # Bias the model toward exact contact spellings. Cap the list so the
         # prompt stays bounded even when the owner has a large phonebook.
@@ -346,6 +403,193 @@ class VoiceService:
         except Exception as exc:  # noqa: BLE001 - never crash the voice handler
             logger.warning("voice.stt.gemini_failed", error=str(exc))
             return ""
+
+    async def _verify_chirp_with_gemini(
+        self,
+        audio_path: str,
+        mime_type: str,
+        hint_names: list[str] | None = None,
+    ) -> str:
+        """Run the slower Gemini STT audit with a strict timeout."""
+        timeout = float(self.settings.stt_verify_timeout_seconds)
+        if timeout <= 0:
+            timeout = 8.0
+        try:
+            return await asyncio.wait_for(
+                self._transcribe_gemini(audio_path, mime_type, hint_names),
+                timeout=timeout,
+            )
+        except TimeoutError:
+            logger.warning("voice.stt.chirp_verify_timeout", timeout=timeout)
+            return ""
+
+    def _should_verify_chirp(self, audio_path: str, text: str) -> bool:
+        """True when a Chirp transcript is short enough to deserve Gemini audit."""
+        if not self.settings.stt_verify_chirp:
+            return False
+        cleaned = (text or "").strip()
+        if not cleaned:
+            return False
+        if self._looks_like_hint_leak(cleaned):
+            return True
+        if self._too_long_for_audio(audio_path, cleaned):
+            return True
+        if len(cleaned) > self.settings.stt_verify_max_chars:
+            return False
+        if not self._has_action_signal(cleaned):
+            return True
+        # Contact-name-looking fragments with punctuation are a common failure
+        # mode for short commands ("shunga..." -> "Shohjahon aka...").
+        if "," in cleaned and _STT_CONTACT_HALLUCINATION_RE.search(cleaned):
+            return True
+        return False
+
+    @staticmethod
+    def _has_action_signal(text: str) -> bool:
+        return _STT_ACTION_RE.search(text or "") is not None
+
+    def _choose_verified_stt(self, chirp_text: str, gemini_text: str) -> str:
+        """Pick the safer transcript after a suspicious Chirp result."""
+        chirp = self._repair_stt_text(chirp_text)
+        gemini = self._repair_stt_text(gemini_text)
+        chirp_suspicious = (
+            self._looks_like_contact_hallucination(chirp)
+            or self._looks_like_hint_leak(chirp)
+        )
+        if not gemini or self._looks_like_bad_verification(gemini):
+            if chirp_suspicious:
+                return ""
+            return chirp
+        if self._has_action_signal(gemini) and not self._has_action_signal(chirp):
+            return gemini
+        if self._looks_more_like_command(gemini, chirp):
+            return gemini
+        if chirp_suspicious:
+            return gemini
+        return chirp
+
+    @staticmethod
+    def _looks_more_like_command(gemini: str, chirp: str) -> bool:
+        """Prefer Gemini when it forms a plausible command and Chirp is a fragment."""
+        if not gemini or not chirp:
+            return False
+        if len(gemini) < 8:
+            return False
+        gemini_hits = len(_STT_COMMANDISH_RE.findall(gemini))
+        chirp_hits = len(_STT_COMMANDISH_RE.findall(chirp))
+        if gemini_hits < 2:
+            return False
+        # Example from production: Chirp "Asadbekka Kilent", Gemini
+        # "Joni, Asadbekka salom." The latter is the real command; the former
+        # is a contact-like fragment plus a hallucinated word.
+        if chirp_hits <= 1 and len(chirp.split()) <= 4:
+            return True
+        return gemini_hits >= chirp_hits + 2
+
+    @staticmethod
+    def _looks_like_contact_hallucination(text: str) -> bool:
+        if not text:
+            return False
+        return (
+            len(text) <= 90
+            and _STT_ACTION_RE.search(text) is None
+            and (
+                _STT_CONTACT_HALLUCINATION_RE.search(text) is not None
+                or "," in text
+                or _STT_INITIALS_LIKE_RE.search(text) is not None
+            )
+        )
+
+    def _too_long_for_audio(self, audio_path: str, text: str) -> bool:
+        """Detect impossible transcripts, e.g. a 2s clip becoming 300 chars."""
+        duration = self._audio_duration_seconds(audio_path)
+        if duration is None or duration <= 0:
+            return False
+        # Uzbek speech is usually far below this. Keep the ceiling generous so
+        # real fast speech passes, but leaked phrase lists from short clips fail.
+        max_chars = max(90, int(duration * 32) + 40)
+        too_long = len(text) > max_chars
+        if too_long:
+            logger.warning(
+                "voice.stt.chirp_implausible_length",
+                chars=len(text),
+                duration=round(duration, 2),
+                max_chars=max_chars,
+            )
+        return too_long
+
+    @staticmethod
+    def _audio_duration_seconds(audio_path: str) -> float | None:
+        """Best-effort duration for preprocessed WAV files."""
+        try:
+            with wave.open(audio_path, "rb") as fh:
+                frames = fh.getnframes()
+                rate = fh.getframerate()
+                if rate:
+                    return frames / float(rate)
+        except Exception:  # noqa: BLE001 - duration is only a confidence signal
+            return None
+        return None
+
+    @staticmethod
+    def _looks_like_hint_leak(text: str) -> bool:
+        """True when STT returned the phrase/contact hints instead of speech."""
+        cleaned = " ".join((text or "").lower().split())
+        if not cleaned:
+            return False
+        comma_count = cleaned.count(",")
+        phrase_hits = sum(1 for phrase in _STT_HINT_LEAK_PHRASES if phrase in cleaned)
+        if comma_count >= 5 and phrase_hits >= 1:
+            return True
+        tokens = [
+            t.strip("'`ʻʼ‘’").lower()
+            for t in _STT_TOKEN_RE.findall(cleaned)
+            if t.strip("'`ʻʼ‘’")
+        ]
+        if comma_count >= 8 and len(tokens) >= 20:
+            return True
+        return False
+
+    def _looks_like_bad_verification(self, text: str) -> bool:
+        """Reject Gemini audit output that is clearly not a transcript."""
+        cleaned = " ".join((text or "").strip().split())
+        if not cleaned:
+            return True
+        max_reasonable = max(160, int(self.settings.stt_verify_max_chars) * 2)
+        if len(cleaned) > max_reasonable:
+            return True
+        tokens = [
+            t.strip("'`ʻʼ‘’").lower()
+            for t in _STT_TOKEN_RE.findall(cleaned)
+            if t.strip("'`ʻʼ‘’")
+        ]
+        if len(tokens) < 12:
+            return False
+        single_letters = sum(1 for token in tokens if len(token) == 1)
+        if single_letters / len(tokens) > 0.6:
+            return True
+        return len(set(tokens)) <= max(3, len(tokens) // 10)
+
+    @staticmethod
+    def _repair_stt_text(text: str) -> str:
+        """Fix high-confidence command mishears seen in short Uzbek voice notes."""
+        cleaned = " ".join((text or "").strip().split())
+        if not cleaned:
+            return ""
+        if (
+            _STT_SHORT_REF_RE.search(cleaned)
+            and _STT_SALOM_MISHEAR_RE.search(cleaned)
+        ):
+            ref = "shunga"
+            lowered = cleaned.lower()
+            if "shu odam" in lowered:
+                ref = "shu odamga"
+            elif "shu kontakt" in lowered:
+                ref = "shu kontaktga"
+            elif "unga" in lowered and "shunga" not in lowered and "shuga" not in lowered:
+                ref = "unga"
+            return f"Ha, {ref} salom deb yubor."
+        return cleaned
 
     def _transcribe_sync(
         self, client: Any, audio_path: str, language_code: str

@@ -18,15 +18,21 @@ Design notes:
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import html
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
+from io import BytesIO
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
+from telegram import InputFile
+
+from app.bot import ui
 from app.bot.keyboards import (
     KIND_DECISION,
     KIND_EVENT,
@@ -63,6 +69,7 @@ from app.repositories import (
     meeting_repo,
     person_repo,
     reminder_repo,
+    setting_repo,
     task_repo,
 )
 from app.services._timeutil import as_utc, to_local_str
@@ -72,6 +79,11 @@ if TYPE_CHECKING:
     from app.registry import ServiceRegistry
 
 logger = get_logger(__name__)
+
+
+async def _telegram_input_file(path: str, *, filename: str | None = None) -> InputFile:
+    data = await asyncio.to_thread(Path(path).read_bytes)
+    return InputFile(BytesIO(data), filename=filename or Path(path).name)
 
 
 @dataclass
@@ -86,6 +98,10 @@ class DispatchResult:
     text: str
     reply_markup: Any | None = None
     parse_mode: str | None = None
+    # When True AND the owner's request arrived as a voice note, the bot also
+    # speaks this reply back (TTS) — a conversational answer, like Gemini Live.
+    # Only set for plain conversational text (no markup/buttons).
+    speak: bool = False
 
 
 # ── pending contact disambiguation (numbered "which one?" selection) ───────────
@@ -143,6 +159,104 @@ class _PendingOutbound:
 
 
 _PENDING_OUT: dict[int, _PendingOutbound] = {}
+_PENDING_OUT_KEY_PREFIX = "pending_outbound:"
+_OUTBOUND_PROMPT_RE = re.compile(
+    r"📨\s*(?P<name>.+?)\s*—\s*xabar tayyor\s*(?P<content>.*?)\s*Qanday yuboray\?",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _pending_out_key(owner_key: int) -> str:
+    return f"{_PENDING_OUT_KEY_PREFIX}{owner_key}"
+
+
+def _serialize_pending_outbound(pending: _PendingOutbound) -> dict[str, Any]:
+    return {
+        "kind": pending.kind,
+        "recipient_id": pending.recipient_id,
+        "display_name": pending.display_name,
+        "content": pending.content,
+        "is_owner": pending.is_owner,
+        "send_at": pending.send_at.isoformat() if pending.send_at else None,
+        "also_send_now": pending.also_send_now,
+    }
+
+
+def _deserialize_pending_outbound(value: Any) -> _PendingOutbound | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        raw_send_at = value.get("send_at")
+        send_at = datetime.fromisoformat(raw_send_at) if raw_send_at else None
+        return _PendingOutbound(
+            kind=str(value["kind"]),
+            recipient_id=int(value["recipient_id"]),
+            display_name=str(value["display_name"]),
+            content=str(value["content"]),
+            is_owner=bool(value.get("is_owner")),
+            send_at=send_at,
+            also_send_now=bool(value.get("also_send_now")),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+async def _set_pending_outbound(
+    registry: ServiceRegistry, owner_key: int, pending: _PendingOutbound
+) -> None:
+    """Store the outbound choice state in memory and DB so restarts can resume."""
+    _PENDING_OUT[owner_key] = pending
+    async with registry.session() as session:
+        await setting_repo.set_value(
+            session, _pending_out_key(owner_key), _serialize_pending_outbound(pending)
+        )
+
+
+async def _pop_pending_outbound(
+    registry: ServiceRegistry, owner_key: int
+) -> _PendingOutbound | None:
+    """Load then remove the pending outbound state from memory and DB."""
+    pending = _PENDING_OUT.pop(owner_key, None)
+    async with registry.session() as session:
+        value = None
+        if pending is None:
+            value = await setting_repo.get_value(session, _pending_out_key(owner_key))
+        await setting_repo.delete_value(session, _pending_out_key(owner_key))
+    if pending is not None:
+        return pending
+    return _deserialize_pending_outbound(value)
+
+
+async def _recover_pending_outbound_from_prompt(
+    registry: ServiceRegistry, prompt_text: str | None
+) -> _PendingOutbound | None:
+    """Recover an old pre-persistence outbound prompt from its Telegram text."""
+    if not prompt_text:
+        return None
+    plain = html.unescape(re.sub(r"<[^>]+>", "", prompt_text))
+    plain = re.sub(r"\s*\n+\s*", " ", plain).strip()
+    match = _OUTBOUND_PROMPT_RE.search(plain)
+    if match is None:
+        return None
+    display_name = match.group("name").strip()
+    content = match.group("content").strip()
+    if not display_name or not content or content.endswith("…"):
+        return None
+    resolved = await _resolve_recipient(registry, display_name)
+    if not isinstance(resolved, ContactMatch) or resolved.chat_id is None:
+        return None
+    logger.info(
+        "dispatch.pending_outbound.recovered_from_prompt",
+        display_name=display_name,
+        person_id=resolved.person_id,
+    )
+    return _PendingOutbound(
+        kind="send",
+        recipient_id=resolved.person_id,
+        display_name=resolved.display_name,
+        content=content,
+        is_owner=resolved.chat_id == registry.settings.owner_chat_id,
+    )
 
 
 def has_pending_outbound(owner_key: int) -> bool:
@@ -153,6 +267,15 @@ def has_pending_outbound(owner_key: int) -> bool:
 def clear_pending_outbound(owner_key: int) -> None:
     """Drop any message awaiting a voice/text choice (e.g. the owner moved on)."""
     _PENDING_OUT.pop(owner_key, None)
+
+
+async def clear_pending_outbound_persisted(
+    registry: ServiceRegistry, owner_key: int
+) -> None:
+    """Drop a pending outbound choice from memory and persistent storage."""
+    clear_pending_outbound(owner_key)
+    async with registry.session() as session:
+        await setting_repo.delete_value(session, _pending_out_key(owner_key))
 
 
 @dataclass
@@ -486,11 +609,17 @@ async def resume_time_day(
     return await _finalize_time(registry, pending, now=now)
 
 
-_CLOCK_TEXT_RE = re.compile(r"^\s*(?:soat\s*)?(\d{1,2})(?::(\d{2}))?\s*$", re.IGNORECASE)
+# Accept the common Uzbek spoken/typed forms: "22:00", "9.30", "soat 13",
+# "13:00 da", "soat 9 da", "13da", "9 larda" — a leading "soat" and a trailing
+# locative particle (da/ga/larda/chi) are optional, and ":"/"." both separate.
+_CLOCK_TEXT_RE = re.compile(
+    r"^\s*(?:soat\s*)?(\d{1,2})(?:[:.](\d{2}))?\s*(?:da|ga|larda|chi)?\s*$",
+    re.IGNORECASE,
+)
 
 
 def _parse_clock_text(text: str) -> tuple[int, int] | None:
-    """Parse a bare typed time ('22:00', '9:30', 'soat 9') to ``(hour, minute)``."""
+    """Parse a bare typed/spoken time ('22:00', '9:30', 'soat 9', '13:00 da')."""
     match = _CLOCK_TEXT_RE.match(text or "")
     if not match:
         return None
@@ -562,8 +691,8 @@ def _outbound_prompt(display_name: str, content: str) -> DispatchResult:
     """Ask how to deliver the pending message: a preview + voice/text buttons."""
     preview = content if len(content) <= 200 else content[:199] + "…"
     return DispatchResult(
-        f"📨 <b>{html.escape(display_name, quote=False)}</b>ga xabar tayyor:\n"
-        f"«{html.escape(preview, quote=False)}»\n\n"
+        f"📨 <b>{ui.esc(display_name)}</b> — xabar tayyor\n"
+        f"<blockquote>{ui.esc(preview)}</blockquote>\n"
         "Qanday yuboray?",
         reply_markup=outbound_choice_keyboard(),
         parse_mode="HTML",
@@ -571,17 +700,23 @@ def _outbound_prompt(display_name: str, content: str) -> DispatchResult:
 
 
 async def complete_outbound(
-    registry: ServiceRegistry, owner_key: int, mode: SendMode
+    registry: ServiceRegistry,
+    owner_key: int,
+    mode: SendMode,
+    *,
+    prompt_text: str | None = None,
 ) -> DispatchResult:
     """Deliver (or schedule) the pending message via the chosen channel.
 
     Called by the ``out:<mode>`` button handler. Returns the same confirmation
     the immediate send/schedule used to return, now that the channel is known.
     """
-    pending = _PENDING_OUT.pop(owner_key, None)
+    pending = await _pop_pending_outbound(registry, owner_key)
+    if pending is None:
+        pending = await _recover_pending_outbound_from_prompt(registry, prompt_text)
     if pending is None:
         return DispatchResult(
-            "Bu so'rov eskirgan. Iltimos, xabarni qaytadan ayting."
+            "Tayyor xabar topilmadi. Avval kimga va nima yuborishni ayting."
         )
 
     if pending.kind == "schedule" and pending.send_at is not None:
@@ -602,19 +737,27 @@ async def complete_outbound(
             source=Source.nlu,
         )
         if pending.also_send_now:
-            text = (
-                f"✅ {pending.display_name}ga xabar hozir yuborildi.\n"
-                f"🔁 🕒 {_local(pending.send_at, registry)} da yana yuboriladi."
+            text = ui.card(
+                "✅",
+                "Xabar yuborildi",
+                fields=[
+                    ("👤", pending.display_name),
+                    ("🔁", f"{_local(pending.send_at, registry)} da yana yuboriladi"),
+                ],
             )
         else:
-            text = (
-                f"✉️ {pending.display_name}ga xabar rejalashtirildi.\n"
-                f"🕒 Vaqt: {_local(pending.send_at, registry)}"
+            text = ui.card(
+                "📨",
+                "Xabar rejalashtirildi",
+                fields=[
+                    ("👤", pending.display_name),
+                    ("🕒", _local(pending.send_at, registry)),
+                ],
             )
         text += _delivery_note(registry, mode)
         text += _test_mode_note(registry, pending.is_owner)
         return DispatchResult(
-            text, reply_markup=undo_button(KIND_MESSAGE, message.id)
+            text, reply_markup=undo_button(KIND_MESSAGE, message.id), parse_mode="HTML"
         )
 
     await registry.message_service.send_message_now(
@@ -623,14 +766,16 @@ async def complete_outbound(
         delivery=mode,
         source=Source.nlu,
     )
-    text = f"{pending.display_name}ga xabar yuborildi."
+    text = ui.card("✅", "Xabar yuborildi", fields=[("👤", pending.display_name)])
     text += _delivery_note(registry, mode)
     text += _test_mode_note(registry, pending.is_owner)
     phone_save = _PENDING_PHONE_SAVE.get(owner_key)
     if phone_save is not None and phone_save.person_id == pending.recipient_id:
         text += "\n\nBu yangi raqamni saqlab qo'yaymi?"
-        return DispatchResult(text, reply_markup=phone_save_keyboard())
-    return DispatchResult(text)
+        return DispatchResult(
+            text, reply_markup=phone_save_keyboard(), parse_mode="HTML"
+        )
+    return DispatchResult(text, parse_mode="HTML")
 
 
 def _script_hint(text: str) -> str:
@@ -793,7 +938,8 @@ _REF_REFERENT_NOUNS = frozenset(
     normalize_name(w)
     for w in (
         "raqam", "nomer", "nomeri", "telefon", "egasi", "ega", "egasiga",
-        "ro'yxat", "ro'yxatdagi", "ro'yxatdan", "raqamdagi",
+        "ro'yxat", "ro'yxatdagi", "ro'yxatdan", "raqamdagi", "akkaunt",
+        "account", "profil", "chat", "yozishma", "suhbat",
     )
 )
 
@@ -1110,9 +1256,14 @@ async def _resolve_recipient(
 
     # Not found yet: pull the owner's address book once (covers a contact added
     # after startup) and retry.
-    from app.userbot.contacts import sync_contacts
+    from app.userbot.contacts import sync_contacts, sync_private_dialogs
 
     await sync_contacts(registry.userbot, registry)
+    async with registry.session() as session:
+        resolved = await resolve_contact(session, name)
+    if resolved is not None:
+        return resolved
+    await sync_private_dialogs(registry.userbot, registry)
     async with registry.session() as session:
         resolved = await resolve_contact(session, name)
     if resolved is not None:
@@ -1281,12 +1432,12 @@ async def dispatch(
     params = routed.params
 
     if name == "unknown" or params is None:
-        return DispatchResult("Tushunmadim, qaytaroq ayting.")
+        return DispatchResult("Tushunmadim, takrorlay olasizmi?")
 
     handler = _HANDLERS.get(name)
     if handler is None:
         logger.warning("dispatch.no_handler", intent=name)
-        return DispatchResult("Tushunmadim, qaytaroq ayting.")
+        return DispatchResult("Tushunmadim, takrorlay olasizmi?")
 
     try:
         return await handler(registry, params, now)
@@ -1332,10 +1483,17 @@ async def _create_reminder(
             source=Source.nlu,
         )
         return DispatchResult(
-            f"🔁 Takroriy eslatma qo'yildi: {params.text}\n"
-            f"📆 Jadval: {recur_label}\n"
-            f"🕒 Keyingi: {_local(when_dt, registry)}",
+            ui.card(
+                "🔁",
+                "Takroriy eslatma qo'yildi",
+                quote=params.text,
+                fields=[
+                    ("📆", recur_label),
+                    ("🕒", f"Keyingi: {_local(when_dt, registry)}"),
+                ],
+            ),
             reply_markup=undo_button(KIND_REMINDER, reminder.id),
+            parse_mode="HTML",
         )
 
     when_dt = parse_uz_time(
@@ -1352,10 +1510,13 @@ async def _create_reminder(
     cal_link = await add_calendar_event(
         registry.calendar_service, title=params.text, start=when_dt
     )
-    text = f"⏰ Eslatma qo'yildi: {params.text}\n🕒 Vaqt: {_local(when_dt, registry)}"
+    fields = [("🕒", _local(when_dt, registry))]
     if cal_link:
-        text += "\n📅 Kalendarga ham qo'shildi."
-    return DispatchResult(text, reply_markup=undo_button(KIND_REMINDER, reminder.id))
+        fields.append(("📅", "Kalendarga qo'shildi"))
+    text = ui.card("⏰", "Eslatma qo'yildi", quote=params.text, fields=fields)
+    return DispatchResult(
+        text, reply_markup=undo_button(KIND_REMINDER, reminder.id), parse_mode="HTML"
+    )
 
 
 # Weekday index (0=Mon..6=Sun) -> APScheduler day_of_week name (avoids the
@@ -1440,13 +1601,13 @@ async def _create_promise(
     cal_link = await add_calendar_event(
         registry.calendar_service, title=params.what, start=deadline_dt
     )
-    text = (
-        f"🤝 Va'da yozib qo'yildi: {params.what}\n"
-        f"🕒 Muddat: {_local(deadline_dt, registry)}"
-    )
+    fields = [("🕒", f"Muddat: {_local(deadline_dt, registry)}")]
     if cal_link:
-        text += "\n📅 Kalendarga ham qo'shildi."
-    return DispatchResult(text, reply_markup=undo_button(KIND_PROMISE, task.id))
+        fields.append(("📅", "Kalendarga qo'shildi"))
+    text = ui.card("🤝", "Va'da yozib qo'yildi", quote=params.what, fields=fields)
+    return DispatchResult(
+        text, reply_markup=undo_button(KIND_PROMISE, task.id), parse_mode="HTML"
+    )
 
 
 async def _assign_task_with_followup(
@@ -1532,12 +1693,16 @@ async def _send_message(
     # them pick via buttons. Either way the send runs through complete_outbound.
     is_owner = resolved.chat_id == registry.settings.owner_chat_id
     owner_key = registry.settings.owner_chat_id
-    _PENDING_OUT[owner_key] = _PendingOutbound(
-        kind="send",
-        recipient_id=resolved.person_id,
-        display_name=resolved.display_name,
-        content=params.content,
-        is_owner=is_owner,
+    await _set_pending_outbound(
+        registry,
+        owner_key,
+        _PendingOutbound(
+            kind="send",
+            recipient_id=resolved.person_id,
+            display_name=resolved.display_name,
+            content=params.content,
+            is_owner=is_owner,
+        ),
     )
     explicit = _explicit_send_mode(params.delivery)
     if explicit is not None:
@@ -1575,14 +1740,18 @@ async def _schedule_message(
     # the chosen delivery mode.
     is_owner = resolved.chat_id == registry.settings.owner_chat_id
     owner_key = registry.settings.owner_chat_id
-    _PENDING_OUT[owner_key] = _PendingOutbound(
-        kind="schedule",
-        recipient_id=resolved.person_id,
-        display_name=resolved.display_name,
-        content=content,
-        is_owner=is_owner,
-        send_at=send_at,
-        also_send_now=meeting_notice,
+    await _set_pending_outbound(
+        registry,
+        owner_key,
+        _PendingOutbound(
+            kind="schedule",
+            recipient_id=resolved.person_id,
+            display_name=resolved.display_name,
+            content=content,
+            is_owner=is_owner,
+            send_at=send_at,
+            also_send_now=meeting_notice,
+        ),
     )
     explicit = _explicit_send_mode(params.delivery)
     if explicit is not None:
@@ -1664,14 +1833,16 @@ async def _add_finance(
 
     amount_str = f"{params.amount:g}"
     if direction == DebtDirection.they_owe_me:
-        line = f"{params.counterparty_name} sizga {amount_str} {currency} qarzdor."
+        line = f"{params.counterparty_name} sizga {amount_str} {currency} qarzdor"
     else:
-        line = f"Siz {params.counterparty_name}ga {amount_str} {currency} qarzdorsiz."
-    text = f"💰 Qarz yozib qo'yildi: {line}"
-    text += f"\n📝 Berilgan sana: {_local(record.incurred_at, registry)}"
+        line = f"Siz {params.counterparty_name}ga {amount_str} {currency} qarzdorsiz"
+    fields = [("📅", f"Berildi: {_local(record.incurred_at, registry)}")]
     if due_dt is not None:
-        text += f"\n🕒 To'lov muddati: {_local(due_dt, registry)}"
-    return DispatchResult(text, reply_markup=undo_button(KIND_FINANCE, record.id))
+        fields.append(("🕒", f"Muddat: {_local(due_dt, registry)}"))
+    text = ui.card("💰", "Qarz yozib qo'yildi", quote=line, fields=fields)
+    return DispatchResult(
+        text, reply_markup=undo_button(KIND_FINANCE, record.id), parse_mode="HTML"
+    )
 
 
 async def _cancel_item(
@@ -1684,21 +1855,21 @@ async def _cancel_item(
         row_id = int(selector)
         if kind == "reminder":
             await registry.reminder_service.cancel(row_id)
-            return DispatchResult("Eslatma bekor qilindi.")
+            return DispatchResult("🗑 Eslatma bekor qilindi")
         if kind in ("promise", "followup"):
             await registry.task_service.cancel(row_id)
-            return DispatchResult("Vazifa bekor qilindi.")
+            return DispatchResult("🗑 Vazifa bekor qilindi")
         if kind == "message":
             ok = await registry.message_service.cancel(row_id)
             return DispatchResult(
-                "Xabar bekor qilindi."
+                "🗑 Xabar bekor qilindi"
                 if ok
                 else "Bunday xabar topilmadi yoki allaqachon yuborilgan."
             )
         if kind == "meeting":
             ok = await registry.meeting_service.cancel(row_id)
             return DispatchResult(
-                "Uchrashuv bekor qilindi."
+                "🗑 Uchrashuv bekor qilindi"
                 if ok
                 else "Bunday uchrashuv topilmadi."
             )
@@ -1762,13 +1933,13 @@ async def _schedule_meeting(
                 logger.exception("meeting.meet_link.failed")
                 if _is_google_auth_error(exc):
                     no_link_note = (
-                        "\n(Google ruxsati tugagan — qayta ulang: "
-                        "python -m scripts.google_auth)"
+                        "Google ruxsati tugagan — qayta ulang: "
+                        "python -m scripts.google_auth"
                     )
                 else:
-                    no_link_note = "\n(Meet havolasini yaratib bo'lmadi.)"
+                    no_link_note = "Meet havolasini yaratib bo'lmadi"
         else:
-            no_link_note = "\n(Google ulanmagani uchun Meet havolasi yaratilmadi.)"
+            no_link_note = "Google ulanmagani uchun Meet havolasi yaratilmadi"
 
     meeting = await registry.meeting_service.create_meeting(
         owner_id=owner_id,
@@ -1781,17 +1952,23 @@ async def _schedule_meeting(
         gcal_event_id=gcal_event_id,
     )
 
-    text = (
-        f"📅 Uchrashuv rejalashtirildi: {params.title}\n"
-        f"🕒 Vaqt: {_local(start_at, registry)}"
-    )
-    if meet_link:
-        text += f"\n🔗 Meet: {meet_link}"
-    text += no_link_note
-    text += "\n⏰ 1 kun va 1 soat oldin eslataman."
+    fields = [
+        ("🕒", _local(start_at, registry)),
+        ("⏰", "1 kun va 1 soat oldin eslataman"),
+    ]
     if notify_kind is not None and meet_link:
-        text += f"\n📨 Havola boshlanishida {target_name}ga yuboriladi."
-    return DispatchResult(text, reply_markup=undo_button(KIND_MEETING, meeting.id))
+        fields.append(("📨", f"Havola boshlanishida {target_name}ga yuboriladi"))
+    text = ui.card(
+        "📅",
+        "Uchrashuv rejalashtirildi",
+        quote=params.title,
+        fields=fields,
+        link=("Google Meet", meet_link) if meet_link else None,
+        note=no_link_note or None,
+    )
+    return DispatchResult(
+        text, reply_markup=undo_button(KIND_MEETING, meeting.id), parse_mode="HTML"
+    )
 
 
 async def _find_free_slots(
@@ -2601,6 +2778,481 @@ async def _resolve_or_create_id(
     return person.id
 
 
+async def _resolve_read_contact(
+    registry: ServiceRegistry, name: str, *, intent_name: str, params: Any
+) -> ContactMatch | DispatchResult:
+    """Resolve a contact for read-only Telegram chat tools."""
+    resolved = await _resolve_or_pend(
+        registry,
+        name,
+        intent_name=intent_name,
+        params=params,
+        field="contact_name",
+    )
+    if isinstance(resolved, ContactMatch):
+        if resolved.chat_id is None:
+            return DispatchResult(
+                f"«{name}» kontaktda Telegram ID yo'q. Avval Telegram kontakti "
+                "sinxronlangan bo'lishi kerak."
+            )
+        return resolved
+    if isinstance(resolved, DispatchResult):
+        return resolved
+    return DispatchResult("Kontaktni aniqlay olmadim.")
+
+
+async def _get_weather(
+    registry: ServiceRegistry, params: Any, now: datetime
+) -> DispatchResult:
+    """Return weather for the requested/default location."""
+    from app.services.weather_service import get_weather
+
+    location = (params.location or registry.settings.jarvis_default_location).strip()
+    report = await get_weather(location, params.scope)
+    return DispatchResult(report.text)
+
+
+async def _get_news(
+    registry: ServiceRegistry, params: Any, now: datetime
+) -> DispatchResult:
+    """Aggregate the latest Uzbek world+local headlines as hyperlinked titles."""
+    from app.services.news_service import fetch_news
+
+    limit = params.limit if getattr(params, "limit", 0) and params.limit > 0 else 10
+    channels = [c.strip() for c in registry.settings.news_channels.split(",") if c.strip()]
+    items = await fetch_news(channels=channels, limit=limit)
+    if not items:
+        return DispatchResult(
+            "Yangiliklarni hozir olib bo'lmadi. Birozdan so'ng qayta urinib ko'ring."
+        )
+    lines = [
+        f'{i}. <a href="{html.escape(it.url, quote=True)}">'
+        f"{html.escape(it.title, quote=False)}</a> · "
+        f"<i>{html.escape(it.source, quote=False)}</i>"
+        for i, it in enumerate(items, start=1)
+    ]
+    text = "🌍 <b>So'nggi jahon yangiliklari</b>\n\n" + "\n".join(lines)
+    return DispatchResult(text, parse_mode="HTML")
+
+
+async def _jarvis_briefing(
+    registry: ServiceRegistry, params: Any, now: datetime
+) -> DispatchResult:
+    """Compact Jarvis-style readout: agenda plus weather."""
+    from app.brain.intents import ListAgenda
+    from app.services.weather_service import get_weather
+
+    scope = params.scope if params.scope in ("today", "week") else "today"
+    agenda = await _list_agenda(registry, ListAgenda(scope=scope), now)
+    weather_scope = "week" if scope == "week" else "today"
+    weather = await get_weather(registry.settings.jarvis_default_location, weather_scope)
+    text = (
+        "🤖 <b>Jarvis briefing</b>\n\n"
+        f"{html.escape(weather.text, quote=False)}\n\n"
+        f"{agenda.text}"
+    )
+    return DispatchResult(text, parse_mode=agenda.parse_mode or "HTML")
+
+
+# ── short-term conversation memory (answer_question multi-turn) ────────────────
+# Gemini-app-style follow-ups: each Q&A turn remembers the last few exchanges so
+# "uning poytaxti-chi?" / "aholisi qancha?" continues the previous topic. It is
+# in-memory, per owner, and expires after _CONV_TTL of silence. Only
+# answer_question turns are stored, so action commands never pollute the context.
+@dataclass
+class _ConvTurn:
+    """One conversational message — role is "user" or "model"."""
+
+    role: str
+    text: str
+
+
+_CONV: dict[int, list[_ConvTurn]] = {}
+_CONV_AT: dict[int, datetime] = {}
+_CONV_MAX_MSGS = 12  # ~6 question/answer exchanges
+_CONV_TTL = timedelta(minutes=15)
+
+
+def _conv_history(owner_key: int, now: datetime) -> list[tuple[str, str]]:
+    """Recent Q&A turns for the owner; expires (and clears) after _CONV_TTL."""
+    last = _CONV_AT.get(owner_key)
+    if last is not None and now - last > _CONV_TTL:
+        _CONV.pop(owner_key, None)
+        _CONV_AT.pop(owner_key, None)
+    return [(t.role, t.text) for t in _CONV.get(owner_key, [])]
+
+
+def _conv_remember(
+    owner_key: int, now: datetime, user_text: str, model_text: str
+) -> None:
+    """Append a (question, answer) exchange, trimmed to the recent window."""
+    if not (user_text or "").strip() or not (model_text or "").strip():
+        return
+    turns = _CONV.setdefault(owner_key, [])
+    turns.append(_ConvTurn("user", user_text.strip()))
+    turns.append(_ConvTurn("model", model_text.strip()))
+    del turns[:-_CONV_MAX_MSGS]
+    _CONV_AT[owner_key] = now
+
+
+def clear_conversation(owner_key: int) -> None:
+    """Forget the Q&A conversation context (tests / explicit reset)."""
+    _CONV.pop(owner_key, None)
+    _CONV_AT.pop(owner_key, None)
+
+
+async def _answer_question(
+    registry: ServiceRegistry, params: Any, now: datetime
+) -> DispatchResult:
+    """General-knowledge / conversational reply (the ``answer_question`` intent).
+
+    The fallback for anything that is not a device action: facts, advice,
+    translations, calculations, chit-chat. Answered in natural Uzbek, optionally
+    grounded with a live web search when the brain flagged ``needs_fresh_info``;
+    recent Q&A turns are fed back so follow-up questions continue the topic.
+    """
+    from app.services.answer_service import answer_question
+
+    owner_key = registry.settings.owner_chat_id
+    now_iso = now.astimezone(ZoneInfo(registry.settings.user_timezone)).isoformat()
+    history = _conv_history(owner_key, now)
+    text = await answer_question(
+        registry.settings,
+        query=params.query,
+        needs_fresh_info=bool(getattr(params, "needs_fresh_info", False)),
+        now_iso=now_iso,
+        history=history,
+    )
+    _conv_remember(owner_key, now, params.query, text)
+    # Speak the answer back when the question came in by voice (set in handlers).
+    return DispatchResult(text, speak=True)
+
+
+async def _summarize_chat(
+    registry: ServiceRegistry, params: Any, now: datetime
+) -> DispatchResult:
+    """Summarize recent Telegram private-chat messages."""
+    from app.integrations.gemini_client import get_gemini_client
+    from app.services.telegram_chat_service import fetch_messages
+
+    resolved = await _resolve_read_contact(
+        registry, params.contact_name, intent_name="summarize_chat", params=params
+    )
+    if isinstance(resolved, DispatchResult):
+        return resolved
+
+    limit = max(1, min(params.limit, registry.settings.jarvis_chat_summary_limit))
+    try:
+        messages = await fetch_messages(
+            registry, resolved.chat_id, scope=params.scope, limit=limit, direction="both"
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("jarvis.chat.summary.failed", error=str(exc))
+        return DispatchResult("Chat tarixini hozir o'qib bo'lmadi.")
+    if not messages:
+        return DispatchResult("Bu oraliqda matnli xabar topilmadi.")
+
+    transcript = "\n".join(f"{m.sender}: {m.text}" for m in messages)
+    client = get_gemini_client(registry.settings)
+    if client is None:
+        excerpt = "\n".join(f"• {m.sender}: {m.text[:160]}" for m in messages[-8:])
+        return DispatchResult(
+            f"AI tahlil hozir sozlanmagan. Oxirgi xabarlar:\n{excerpt}"
+        )
+    try:
+        from google.genai import types
+
+        prompt = (
+            "Quyidagi Telegram yozishmani o'zbek lotinida qisqa tahlil qil. "
+            "Muhim kelishuvlar, sanalar, summa/qarz, javob kutayotgan joylar va "
+            "keyingi amallarni punktlarda ber.\n\n"
+            f"Kontakt: {resolved.display_name}\nYozishma:\n{transcript}"
+        )
+        response = await client.aio.models.generate_content(
+            model=registry.settings.gemini_model,
+            contents=prompt,
+            config=types.GenerateContentConfig(temperature=0.2),
+        )
+        text = (response.text or "").strip()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("jarvis.chat.summary.gemini_failed", error=str(exc))
+        text = ""
+    if not text:
+        text = "\n".join(f"• {m.sender}: {m.text[:160]}" for m in messages[-8:])
+    return DispatchResult(
+        f"💬 <b>{html.escape(resolved.display_name, quote=False)}</b> bilan chat xulosasi:\n"
+        f"{html.escape(text, quote=False)}",
+        parse_mode="HTML",
+    )
+
+
+async def _get_chat_messages(
+    registry: ServiceRegistry, params: Any, now: datetime
+) -> DispatchResult:
+    """Show recent Telegram messages from a private chat."""
+    from app.services.telegram_chat_service import cleanup_item_paths, fetch_recent_items
+
+    resolved = await _resolve_read_contact(
+        registry, params.contact_name, intent_name="get_chat_messages", params=params
+    )
+    if isinstance(resolved, DispatchResult):
+        return resolved
+
+    limit = max(1, min(params.limit, 10))
+    try:
+        items = await fetch_recent_items(
+            registry,
+            resolved.chat_id,
+            scope=params.scope,
+            limit=limit,
+            direction=params.direction,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("jarvis.chat.messages.failed", error=str(exc))
+        return DispatchResult("Chat xabarlarini hozir o'qib bo'lmadi.")
+    if not items:
+        logger.info(
+            "jarvis.chat.messages.none",
+            contact=resolved.display_name,
+            chat_id=resolved.chat_id,
+            direction=params.direction,
+            scope=params.scope,
+            limit=limit,
+        )
+        return DispatchResult(
+            "Mos xabar topilmadi. Bu tanlangan kontakt bilan chat bo'sh bo'lishi "
+            "yoki xabarlar boshqa o'xshash kontaktda bo'lishi mumkin."
+        )
+
+    media_items = [item for item in items if item.path]
+    if media_items:
+        bot = registry.bot
+        if bot is None:
+            await cleanup_item_paths(items)
+            return DispatchResult("Bot ulanishi topilmadi.")
+        sent = 0
+        try:
+            for item in media_items:
+                caption = item.text[:900] if item.text else None
+                upload = await _telegram_input_file(item.path)
+                if item.kind == "photo":
+                    await bot.send_photo(
+                        chat_id=registry.settings.owner_chat_id,
+                        photo=upload,
+                        caption=caption,
+                    )
+                elif item.kind == "video":
+                    await bot.send_video(
+                        chat_id=registry.settings.owner_chat_id,
+                        video=upload,
+                        caption=caption,
+                    )
+                else:
+                    await bot.send_document(
+                        chat_id=registry.settings.owner_chat_id,
+                        document=upload,
+                        caption=caption,
+                    )
+                sent += 1
+        finally:
+            await cleanup_item_paths(items)
+        text_items = [item for item in items if item.text and not item.path]
+        note = ""
+        if text_items:
+            note = "\n\n" + "\n".join(
+                f"• {html.escape(item.sender, quote=False)}: "
+                f"{html.escape(item.text, quote=False)}"
+                for item in text_items
+            )
+        return DispatchResult(
+            f"✅ {html.escape(resolved.display_name, quote=False)} bilan chatdan "
+            f"{sent} ta oxirgi media/xabar yuborildi.{note}",
+            parse_mode="HTML",
+        )
+
+    rows = []
+    for msg in items:
+        sent = _local(msg.sent_at, registry) if msg.sent_at else ""
+        text = html.escape(msg.text, quote=False)
+        rows.append(
+            f"• <b>{html.escape(msg.sender, quote=False)}</b>"
+            f"{f' <i>{html.escape(sent, quote=False)}</i>' if sent else ''}: {text}"
+        )
+    direction = {
+        "incoming": "u yuborgan",
+        "outgoing": "siz yuborgan",
+        "both": "chatdagi",
+    }.get(params.direction, "chatdagi")
+    return DispatchResult(
+        f"💬 <b>{html.escape(resolved.display_name, quote=False)}</b> bilan "
+        f"{direction} oxirgi xabarlar:\n" + "\n".join(rows),
+        parse_mode="HTML",
+    )
+
+
+async def _search_chat_media(
+    registry: ServiceRegistry, params: Any, now: datetime
+) -> DispatchResult:
+    """Find matching chat media and upload it to the owner bot chat."""
+    from app.services.telegram_chat_service import cleanup_media, fetch_media
+
+    resolved = await _resolve_read_contact(
+        registry, params.contact_name, intent_name="search_chat_media", params=params
+    )
+    if isinstance(resolved, DispatchResult):
+        return resolved
+    bot = registry.bot
+    if bot is None:
+        return DispatchResult("Bot ulanishi topilmadi.")
+
+    limit = max(1, min(params.limit, registry.settings.jarvis_chat_media_limit))
+    try:
+        items = await fetch_media(
+            registry,
+            resolved.chat_id,
+            media_type=params.media_type,
+            direction=params.direction,
+            limit=limit,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("jarvis.chat.media.failed", error=str(exc))
+        return DispatchResult("Media qidirishni hozir bajarib bo'lmadi.")
+    if not items:
+        return DispatchResult("Mos media topilmadi.")
+
+    owner_chat_id = registry.settings.owner_chat_id
+    sent = 0
+    try:
+        for item in items:
+            caption = item.caption[:900] if item.caption else None
+            upload = await _telegram_input_file(item.path)
+            if item.kind == "photo":
+                await bot.send_photo(chat_id=owner_chat_id, photo=upload, caption=caption)
+            elif item.kind == "video":
+                await bot.send_video(chat_id=owner_chat_id, video=upload, caption=caption)
+            else:
+                await bot.send_document(
+                    chat_id=owner_chat_id, document=upload, caption=caption
+                )
+            sent += 1
+    finally:
+        await cleanup_media(items)
+
+    direction = {
+        "incoming": "u yuborgan",
+        "outgoing": "siz yuborgan",
+        "both": "chatdagi",
+    }.get(params.direction, "chatdagi")
+    return DispatchResult(
+        f"✅ {html.escape(resolved.display_name, quote=False)} bilan chatdan "
+        f"{direction} {sent} ta media yuborildi.",
+        parse_mode="HTML",
+    )
+
+
+async def _search_telegram_archive(
+    registry: ServiceRegistry, params: Any, now: datetime
+) -> DispatchResult:
+    """Search private chats, groups, and channels by text/media meaning."""
+    from app.services.telegram_archive_service import (
+        cleanup_results,
+        html_result_context,
+        search_archive,
+    )
+
+    bot = registry.bot
+    if registry.userbot is None:
+        return DispatchResult("Userbot ulanmagan. Telegram arxivini o'qib bo'lmaydi.")
+    limit = max(1, min(getattr(params, "limit", 3), 10))
+    logger.info(
+        "jarvis.archive.search.start",
+        query=params.query,
+        chat_name=params.chat_name,
+        chat_types=params.chat_types,
+        media_type=params.media_type,
+        scope=params.scope,
+        limit=limit,
+    )
+    try:
+        results = await search_archive(
+            registry,
+            query=params.query,
+            chat_name=params.chat_name,
+            chat_types=params.chat_types,
+            media_type=params.media_type,
+            scope=params.scope,
+            limit=limit,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("jarvis.archive.search.failed", error=str(exc))
+        return DispatchResult("Telegram arxivini hozir qidirib bo'lmadi.")
+    if not results:
+        return DispatchResult(
+            "Mos xabar/media topilmadi. Agar ovozli xabar shovqinli bo'lgan bo'lsa "
+            "yoki video tavsifi noaniq bo'lsa, guruh/chat nomi yoki vaqtini "
+            "aniqroq ayting."
+        )
+    if bot is None:
+        await cleanup_results(results)
+        return DispatchResult("Bot ulanishi topilmadi.")
+
+    sent = 0
+    try:
+        for result in results:
+            caption = html_result_context(
+                result, timezone=registry.settings.user_timezone
+            )[:1000]
+            if result.path:
+                upload = await _telegram_input_file(result.path)
+                if result.media_kind == "photo":
+                    await bot.send_photo(
+                        chat_id=registry.settings.owner_chat_id,
+                        photo=upload,
+                        caption=caption,
+                        parse_mode="HTML",
+                    )
+                elif result.media_kind == "video":
+                    await bot.send_video(
+                        chat_id=registry.settings.owner_chat_id,
+                        video=upload,
+                        caption=caption,
+                        parse_mode="HTML",
+                    )
+                elif result.media_kind == "voice":
+                    await bot.send_voice(
+                        chat_id=registry.settings.owner_chat_id,
+                        voice=upload,
+                        caption=caption,
+                        parse_mode="HTML",
+                    )
+                elif result.media_kind == "audio":
+                    await bot.send_audio(
+                        chat_id=registry.settings.owner_chat_id,
+                        audio=upload,
+                        caption=caption,
+                        parse_mode="HTML",
+                    )
+                else:
+                    await bot.send_document(
+                        chat_id=registry.settings.owner_chat_id,
+                        document=upload,
+                        caption=caption,
+                        parse_mode="HTML",
+                    )
+            else:
+                await bot.send_message(
+                    chat_id=registry.settings.owner_chat_id,
+                    text=caption,
+                    parse_mode="HTML",
+                )
+            sent += 1
+    finally:
+        await cleanup_results(results)
+    return DispatchResult(
+        f"Telegram arxivdan {sent} ta mos xabar/media topildi va yuqoriga yuborildi."
+    )
+
+
 # ── intent name -> handler map ────────────────────────────────────────────────
 _HANDLERS = {
     "create_reminder": _create_reminder,
@@ -2625,4 +3277,12 @@ _HANDLERS = {
     "list_emails": _list_emails,
     "save_to_notion": _save_to_notion,
     "show_calendar": _show_calendar,
+    "get_weather": _get_weather,
+    "get_news": _get_news,
+    "jarvis_briefing": _jarvis_briefing,
+    "get_chat_messages": _get_chat_messages,
+    "search_chat_media": _search_chat_media,
+    "summarize_chat": _summarize_chat,
+    "search_telegram_archive": _search_telegram_archive,
+    "answer_question": _answer_question,
 }

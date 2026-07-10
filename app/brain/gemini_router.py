@@ -17,8 +17,8 @@ import asyncio
 from typing import Any
 
 from app.brain.intent_router import INTENT_MODELS, RoutedIntent
-from app.brain.nlu_schema import NLUResult
-from app.brain.prompts import ROUTER_SYSTEM_STRUCTURED
+from app.brain.nlu_schema import NLUMultiResult, NLUResult
+from app.brain.prompts import ROUTER_SYSTEM_MULTI, ROUTER_SYSTEM_STRUCTURED
 from app.config import get_settings
 from app.integrations.gemini_client import get_gemini_client
 from app.logging_conf import get_logger
@@ -111,6 +111,18 @@ class GeminiIntentRouter:
             logger.info("gemini_router.no_result")
             return RoutedIntent("unknown", None, {})
 
+        routed = self._to_routed(result)
+        if routed.name == "unknown":
+            logger.info("gemini_router.no_intent", intent=result.intent)
+        elif routed.name == "search_telegram_archive":
+            logger.info("gemini_router.routed", tool=routed.name, params=routed.raw_input)
+        else:
+            logger.info("gemini_router.routed", tool=routed.name)
+        return routed
+
+    @staticmethod
+    def _to_routed(result: NLUResult) -> RoutedIntent:
+        """Map one validated :class:`NLUResult` envelope to a :class:`RoutedIntent`."""
         name = result.intent
         params = getattr(result, name, None) if name != "unknown" else None
         # Defensive: the model named an intent but left its sub-object empty —
@@ -121,10 +133,53 @@ class GeminiIntentRouter:
                 if filled is not None:
                     name, params = candidate, filled
                     break
-
         if params is None:
-            logger.info("gemini_router.no_intent", intent=result.intent)
             return RoutedIntent("unknown", None, {})
-
-        logger.info("gemini_router.routed", tool=name)
         return RoutedIntent(name, params, params.model_dump())
+
+    @staticmethod
+    def _parse_multi(response: Any) -> NLUMultiResult | None:
+        """Extract an :class:`NLUMultiResult` from a Gemini response (``None`` on fail)."""
+        parsed = getattr(response, "parsed", None)
+        if isinstance(parsed, NLUMultiResult):
+            return parsed
+        text = getattr(response, "text", None)
+        if text:
+            try:
+                return NLUMultiResult.model_validate_json(text)
+            except Exception:  # noqa: BLE001 — surface as single-route fallback
+                logger.exception("gemini_router.parse_multi_failed", text=str(text)[:200])
+        return None
+
+    async def route_many(self, utterance: str, *, now_iso: str) -> list[RoutedIntent]:
+        """Split one utterance into one or more ordered :class:`RoutedIntent`s.
+
+        Uses a multi-action structured schema so a single message carrying
+        several commands ("... ayt, hozir ogohlantir va ... ogohlantir") routes
+        to all of them. Falls back to single :meth:`route` when the model returns
+        no usable actions.
+        """
+        if self.client is None:
+            raise RuntimeError(
+                "Sun'iy intellekt sozlanmagan: GEMINI_API_KEY topilmadi. "
+                "aistudio.google.com dan tekin kalit oling va .env ga qo'shing."
+            )
+
+        from google.genai import types
+
+        config = types.GenerateContentConfig(
+            system_instruction=ROUTER_SYSTEM_MULTI,
+            response_mime_type="application/json",
+            response_schema=NLUMultiResult,
+            temperature=0,
+        )
+        response = await self._generate_with_retry(
+            contents=f"<now>{now_iso}</now> {utterance}", config=config
+        )
+        multi = self._parse_multi(response)
+        if multi is None or not multi.actions:
+            return [await self.route(utterance, now_iso=now_iso)]
+        # Cap defensively so a runaway split can never spawn a huge action chain.
+        routed = [self._to_routed(a) for a in multi.actions[:8]]
+        logger.info("gemini_router.routed_many", tools=[r.name for r in routed])
+        return routed

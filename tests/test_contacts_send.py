@@ -14,8 +14,13 @@ from app.brain.contacts import ContactMatch, resolve_contact
 from app.brain.intent_router import RoutedIntent
 from app.brain.intents import Formality, SendMessage
 from app.db.models.enums import SendMode
-from app.repositories import person_repo
-from app.services.dispatcher import _resolve_recipient, complete_outbound, dispatch
+from app.repositories import person_repo, setting_repo
+from app.services.dispatcher import (
+    _pending_out_key,
+    _resolve_recipient,
+    complete_outbound,
+    dispatch,
+)
 from app.userbot.contacts import sync_contacts
 
 
@@ -227,7 +232,62 @@ async def test_complete_outbound_without_pending_is_graceful(registry):
     result = await complete_outbound(
         registry, registry.settings.owner_chat_id, SendMode.text
     )
-    assert "eskirgan" in result.text
+    assert "eskirgan" not in result.text
+    assert "Tayyor xabar topilmadi" in result.text
+
+
+async def test_complete_outbound_restores_pending_after_restart(registry):
+    from app.services.dispatcher import clear_pending_outbound
+
+    async with registry.session() as session:
+        await person_repo.upsert_telegram_contact(
+            session, telegram_user_id=782, display_name="Bobur"
+        )
+    routed = RoutedIntent(
+        "send_message", SendMessage(recipient_name="Bobur", content="salom"), {}
+    )
+    prompt = await dispatch(registry, routed, now=_now())
+    assert "Qanday yuboray" in prompt.text
+
+    # Simulate deploy/restart: RAM state is gone, but the chat button remains.
+    clear_pending_outbound(registry.settings.owner_chat_id)
+    result = await complete_outbound(
+        registry, registry.settings.owner_chat_id, SendMode.text
+    )
+    assert "Bobur" in result.text
+    assert "yuborildi" in result.text
+    assert "eskirgan" not in result.text
+
+
+async def test_complete_outbound_recovers_old_prompt_text(registry):
+    from app.services.dispatcher import clear_pending_outbound
+
+    async with registry.session() as session:
+        await person_repo.upsert_telegram_contact(
+            session, telegram_user_id=783, display_name="Aziz"
+        )
+    routed = RoutedIntent(
+        "send_message", SendMessage(recipient_name="Aziz", content="salom"), {}
+    )
+    prompt = await dispatch(registry, routed, now=_now())
+    assert "Qanday yuboray" in prompt.text
+
+    # Simulate a button created before outbound state was persisted: process
+    # memory and DB state are gone, but Telegram still sends the prompt text.
+    clear_pending_outbound(registry.settings.owner_chat_id)
+    async with registry.session() as session:
+        await setting_repo.delete_value(
+            session, _pending_out_key(registry.settings.owner_chat_id)
+        )
+    result = await complete_outbound(
+        registry,
+        registry.settings.owner_chat_id,
+        SendMode.text,
+        prompt_text=prompt.text,
+    )
+    assert "Aziz" in result.text
+    assert "yuborildi" in result.text
+    assert "eskirgan" not in result.text
 
 
 async def test_schedule_message_asks_channel_then_schedules(registry):
@@ -297,7 +357,7 @@ async def test_meeting_notice_sends_now_and_schedules(registry):
     after = len(registry.scheduler.get_jobs())
     # Confirms both deliveries; the future copy registers exactly one job (the
     # immediate copy sends inline with no job, so it can't double-fire).
-    assert "hozir yuborildi" in result.text
+    assert "Xabar yuborildi" in result.text
     assert "yana yuboriladi" in result.text
     assert after == before + 1
 
@@ -324,7 +384,7 @@ async def test_plain_schedule_message_is_not_a_meeting_notice(registry):
         registry, registry.settings.owner_chat_id, SendMode.text
     )
     assert "rejalashtirildi" in result.text
-    assert "hozir yuborildi" not in result.text
+    assert "yana yuboriladi" not in result.text
 
 
 def test_schedule_message_tool_exposes_meeting_fields():

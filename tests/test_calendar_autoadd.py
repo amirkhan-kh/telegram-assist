@@ -94,7 +94,7 @@ async def test_one_shot_reminder_creates_timed_event_and_notes_it(registry):
         {},
     )
     result = await dispatch(registry, routed, now=_now())
-    assert "Kalendarga ham qo'shildi" in result.text
+    assert "Kalendarga qo'shildi" in result.text
     assert len(cal.created) == 1
     assert cal.created[0]["all_day"] is False
     assert cal.created[0]["title"] == "Hujjat topshirish"
@@ -109,7 +109,7 @@ async def test_promise_creates_timed_calendar_event(registry):
         {},
     )
     result = await dispatch(registry, routed, now=_now())
-    assert "Kalendarga ham qo'shildi" in result.text
+    assert "Kalendarga qo'shildi" in result.text
     assert len(cal.created) == 1
     assert cal.created[0]["all_day"] is False
 

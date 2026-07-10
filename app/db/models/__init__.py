@@ -32,6 +32,7 @@ from app.db.models.person import Person
 from app.db.models.reminder import Reminder
 from app.db.models.setting import Secret, Setting
 from app.db.models.task import Task
+from app.db.models.telegram_archive import TelegramArchiveDialog, TelegramArchiveMessage
 
 __all__ = [
     "Base",
@@ -51,6 +52,8 @@ __all__ = [
     "DocumentPhoto",
     "Setting",
     "Secret",
+    "TelegramArchiveDialog",
+    "TelegramArchiveMessage",
     # enums
     "EventCategory",
     "EventStatus",

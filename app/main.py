@@ -84,11 +84,13 @@ async def main() -> None:
     # empty right after a restart (best-effort; never blocks startup).
     backfill_task: asyncio.Task | None = None
     contacts_task: asyncio.Task | None = None
+    archive_index_task: asyncio.Task | None = None
     if authorized:
         backfill_task = asyncio.create_task(_run_backfill(registry, userbot))
         # Mirror the owner's phone/Telegram contacts so messages can be
         # addressed by saved contact name (best-effort, in the background).
         contacts_task = asyncio.create_task(_run_contact_sync(registry, userbot))
+        archive_index_task = asyncio.create_task(_run_archive_indexer(registry, userbot))
 
     log.info(
         "telegram-assistant started",
@@ -105,6 +107,8 @@ async def main() -> None:
             backfill_task.cancel()
         if contacts_task is not None:
             contacts_task.cancel()
+        if archive_index_task is not None:
+            archive_index_task.cancel()
         with contextlib.suppress(Exception):
             scheduler.shutdown(wait=False)
         with contextlib.suppress(Exception):
@@ -216,10 +220,22 @@ async def _run_backfill(registry: ServiceRegistry, userbot: object) -> None:
 
 async def _run_contact_sync(registry: ServiceRegistry, userbot: object) -> None:
     """Background sync of the owner's Telegram contacts (best-effort)."""
-    from app.userbot.contacts import sync_contacts
+    from app.userbot.contacts import sync_contacts, sync_private_dialogs
 
     with contextlib.suppress(asyncio.CancelledError):
         await sync_contacts(userbot, registry)  # type: ignore[arg-type]
+        await sync_private_dialogs(userbot, registry)  # type: ignore[arg-type]
+
+
+async def _run_archive_indexer(registry: ServiceRegistry, userbot: object) -> None:
+    """Continuously refresh the local Telegram archive index in the background."""
+    from app.services.telegram_archive_indexer import run_archive_index_cycle
+
+    interval = max(60, registry.settings.jarvis_archive_index_interval_seconds)
+    with contextlib.suppress(asyncio.CancelledError):
+        while True:
+            await run_archive_index_cycle(registry, userbot)
+            await asyncio.sleep(interval)
 
 
 def _schedule_daily_digest(registry: ServiceRegistry) -> None:

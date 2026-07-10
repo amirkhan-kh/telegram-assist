@@ -79,7 +79,7 @@ async def test_resume_choice_pid_selects_contact(registry):
     assert not dispatcher.has_pending(owner_key)
 
     out = await dispatcher.complete_outbound(registry, owner_key, SendMode.text)
-    assert "xabar yuborildi" in out.text
+    assert "Xabar yuborildi" in out.text
 
 
 async def test_resume_choice_pid_stale_or_missing(registry):
@@ -146,7 +146,7 @@ async def test_unsaved_phone_prompts_save_after_delivery(registry, monkeypatch):
 
     out = await dispatcher.complete_outbound(registry, owner_key, SendMode.text)
 
-    assert "xabar yuborildi" in out.text
+    assert "Xabar yuborildi" in out.text
     assert "saqlab qo'yaymi" in out.text
     payloads = [b.callback_data for row in out.reply_markup.inline_keyboard for b in row]
     assert payloads == ["savephone:yes", "savephone:no"]

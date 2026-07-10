@@ -7,7 +7,7 @@ import pytest
 from app.brain.gemini_router import GeminiIntentRouter
 from app.brain.intent_router import IntentRouter
 from app.brain.intents import CreateReminder, SendMessage, TimeSpec
-from app.brain.nlu_schema import NLUResult
+from app.brain.nlu_schema import NLUMultiResult, NLUResult
 from app.brain.router_factory import build_router
 
 
@@ -110,6 +110,51 @@ async def test_route_requires_client():
     assert router.client is None
     with pytest.raises(RuntimeError):
         await router.route("salom", now_iso="2026-06-18T13:00:00+05:00")
+
+
+def _multi_result() -> NLUMultiResult:
+    return NLUMultiResult(
+        actions=[
+            NLUResult(
+                reasoning="notify now",
+                intent="send_message",
+                send_message=SendMessage(recipient_name="Doniyor", content="salom"),
+            ),
+            NLUResult(
+                reasoning="second send",
+                intent="send_message",
+                send_message=SendMessage(recipient_name="Dilnoza", content="qo'ng'iroq"),
+            ),
+            NLUResult(
+                reasoning="reminder",
+                intent="create_reminder",
+                create_reminder=CreateReminder(text="suv ich", when=_WHEN, pre_alerts_minutes=[]),
+            ),
+        ]
+    )
+
+
+async def test_route_many_splits_into_ordered_intents():
+    router = GeminiIntentRouter(client=_FakeClient(_FakeResponse(parsed=_multi_result())))
+    routed = await router.route_many("...", now_iso="2026-06-18T13:00:00+05:00")
+    assert [r.name for r in routed] == ["send_message", "send_message", "create_reminder"]
+    assert routed[0].params.recipient_name == "Doniyor"
+    assert routed[1].params.recipient_name == "Dilnoza"
+
+
+async def test_route_many_parses_from_json_text():
+    response = _FakeResponse(parsed=None, text=_multi_result().model_dump_json())
+    router = GeminiIntentRouter(client=_FakeClient(response))
+    routed = await router.route_many("...", now_iso="2026-06-18T13:00:00+05:00")
+    assert [r.name for r in routed] == ["send_message", "send_message", "create_reminder"]
+
+
+async def test_route_many_empty_actions_falls_back_to_single():
+    router = GeminiIntentRouter(
+        client=_FakeClient(_FakeResponse(parsed=NLUMultiResult(actions=[])))
+    )
+    routed = await router.route_many("salom", now_iso="2026-06-18T13:00:00+05:00")
+    assert len(routed) == 1
 
 
 def _flaky_client(fail_times: int, response: _FakeResponse, counter: dict):

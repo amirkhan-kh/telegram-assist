@@ -19,12 +19,17 @@ from pydantic import BaseModel
 from app.brain.intents import (
     AddFinance,
     AddImportantDate,
+    AnswerQuestion,
     AssignTaskWithFollowup,
     CancelItem,
     CreatePromise,
     CreateReminder,
     FindFreeSlots,
+    GetChatMessages,
     GetDigest,
+    GetNews,
+    GetWeather,
+    JarvisBriefing,
     ListAgenda,
     ListContacts,
     ListDecisions,
@@ -37,11 +42,14 @@ from app.brain.intents import (
     SaveToNotion,
     ScheduleMeeting,
     ScheduleMessage,
+    SearchChatMedia,
+    SearchTelegramArchive,
     SendMessage,
     ShowCalendar,
+    SummarizeChat,
 )
 from app.brain.prompts import ROUTER_SYSTEM
-from app.brain.tools import build_tools
+from app.brain.tools import ANTHROPIC_TOOLS
 from app.config import get_settings
 from app.integrations.anthropic_client import get_async_anthropic
 from app.logging_conf import get_logger
@@ -73,6 +81,14 @@ INTENT_MODELS: dict[str, type[BaseModel]] = {
     "list_emails": ListEmails,
     "save_to_notion": SaveToNotion,
     "show_calendar": ShowCalendar,
+    "get_weather": GetWeather,
+    "get_news": GetNews,
+    "jarvis_briefing": JarvisBriefing,
+    "get_chat_messages": GetChatMessages,
+    "search_chat_media": SearchChatMedia,
+    "summarize_chat": SummarizeChat,
+    "search_telegram_archive": SearchTelegramArchive,
+    "answer_question": AnswerQuestion,
 }
 
 
@@ -127,7 +143,9 @@ class IntentRouter:
                     "cache_control": {"type": "ephemeral"},
                 }
             ],
-            tools=build_tools(),
+            # Reuse the module-level tool list (built once) instead of rebuilding
+            # all 29 schemas per message; the Anthropic SDK never mutates it.
+            tools=ANTHROPIC_TOOLS,
             tool_choice={"type": "any"},
             messages=[
                 {
@@ -156,3 +174,12 @@ class IntentRouter:
 
         logger.info("router.no_tool_use")
         return RoutedIntent("unknown", None, {})
+
+    async def route_many(self, utterance: str, *, now_iso: str) -> list[RoutedIntent]:
+        """Route one utterance to ordered intents.
+
+        The Anthropic router runs with forced single tool use, so multi-action
+        splitting is only available on the Gemini provider; here we return the
+        single best intent (callers handle the single-element list uniformly).
+        """
+        return [await self.route(utterance, now_iso=now_iso)]

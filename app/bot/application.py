@@ -23,9 +23,9 @@ from telegram.ext import (
 
 from app.bot.handlers import (
     on_callback,
+    on_contact,
     on_error,
     on_help,
-    on_contact,
     on_photo,
     on_start,
     on_text,

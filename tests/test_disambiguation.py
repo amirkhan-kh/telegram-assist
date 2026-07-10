@@ -66,7 +66,7 @@ async def test_send_message_disambiguation_then_select(registry):
     from app.db.models.enums import SendMode
 
     res3 = await dispatcher.complete_outbound(registry, owner_key, SendMode.text)
-    assert "xabar yuborildi" in res3.text
+    assert "Xabar yuborildi" in res3.text
 
 
 async def test_resume_choice_out_of_range_keeps_pending(registry):

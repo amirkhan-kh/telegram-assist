@@ -6,7 +6,8 @@ channels the account is subscribed to. Each new channel post is upserted as a
 forwards, reaction count); :class:`~app.services.digest_service.DigestService`
 later scores these to build the digest.
 
-Group / private messages are ignored — only broadcast channels feed the digest.
+Group / private messages are also indexed for Jarvis archive search, while only
+broadcast channels feed the digest.
 A handler must never raise out of the Telethon event loop, so the whole body is
 guarded.
 """
@@ -19,6 +20,7 @@ from telethon import events
 
 from app.logging_conf import get_logger
 from app.repositories import channel_repo
+from app.services.telegram_archive_indexer import index_event_message
 
 if TYPE_CHECKING:
     from telethon import TelegramClient
@@ -106,13 +108,14 @@ def register_userbot_handlers(
 ) -> None:
     """Attach userbot event handlers to ``client``.
 
-    Registers a ``NewMessage`` handler that ingests broadcast-channel posts for
-    the digest; everything else is ignored.
+    Registers a ``NewMessage`` handler that indexes visible private/group/channel
+    messages for archive search and ingests broadcast-channel posts for digest.
     """
 
     @client.on(events.NewMessage)
     async def _on_new_message(event: events.NewMessage.Event) -> None:
         try:
+            await index_event_message(registry, event)
             if not getattr(event, "is_channel", False):
                 return
             chat = await event.get_chat()

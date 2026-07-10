@@ -7,6 +7,9 @@ and assert only the wiring inside :class:`VoiceService`.
 
 from __future__ import annotations
 
+import asyncio
+import wave
+
 from app.services.voice_service import VoiceService
 
 
@@ -30,6 +33,18 @@ def _fake_gemini(text: str):
     return client
 
 
+class _SlowModels:
+    async def generate_content(self, *, model, contents, config):
+        await asyncio.sleep(0.05)
+        return _Resp("Ha, shunga salom berib o'tdik.")
+
+
+def _slow_gemini():
+    client = type("C", (), {})()
+    client.aio = type("Aio", (), {"models": _SlowModels()})()
+    return client
+
+
 def _chirp_settings(settings, **extra):
     """Settings with Chirp enabled + a resolvable project, ElevenLabs off."""
     update = {
@@ -45,6 +60,18 @@ def _chirp_settings(settings, **extra):
 def _write_audio(tmp_path):
     audio = tmp_path / "voice.wav"
     audio.write_bytes(b"RIFF-fake-wav-bytes")
+    return str(audio)
+
+
+def _write_wav(tmp_path, seconds: float = 2.5):
+    audio = tmp_path / "real_voice.wav"
+    rate = 16000
+    frames = int(rate * seconds)
+    with wave.open(str(audio), "wb") as fh:
+        fh.setnchannels(1)
+        fh.setsampwidth(2)
+        fh.setframerate(rate)
+        fh.writeframes(b"\x00\x00" * frames)
     return str(audio)
 
 
@@ -75,6 +102,107 @@ async def test_chirp_used_when_enabled(settings, tmp_path, monkeypatch):
     assert text == "Asadbekka qo'ng'iroq qil"
     assert captured["hint_names"] == ["Asadbek", "Dilnoza"]
     assert captured["audio_bytes"] == b"RIFF-fake-wav-bytes"
+
+
+async def test_suspicious_chirp_is_verified_and_repaired(
+    settings, tmp_path, monkeypatch
+):
+    """Short contact-hallucination transcripts are audited with Gemini."""
+
+    monkeypatch.setattr(
+        "app.integrations.google_stt.transcribe_chirp_sync",
+        lambda s, b, hint_names=None: "Shohjahon aka yuksalish,Buva",
+    )
+    monkeypatch.setattr(
+        "app.integrations.gemini_client.get_gemini_client",
+        lambda _s: _fake_gemini("Ha, shunga salom berib o'tdik."),
+    )
+
+    s = _chirp_settings(settings)
+    text = await VoiceService(s).transcribe(_write_audio(tmp_path))
+    assert text == "Ha, shunga salom deb yubor."
+
+
+async def test_command_like_gemini_beats_chirp_fragment(settings, tmp_path, monkeypatch):
+    """When Gemini hears the real command and Chirp returns a fragment, use Gemini."""
+
+    monkeypatch.setattr(
+        "app.integrations.google_stt.transcribe_chirp_sync",
+        lambda s, b, hint_names=None: "Asadbekka Kilent",
+    )
+    monkeypatch.setattr(
+        "app.integrations.gemini_client.get_gemini_client",
+        lambda _s: _fake_gemini("Joni, Asadbekka salom."),
+    )
+
+    s = _chirp_settings(settings)
+    text = await VoiceService(s).transcribe(_write_audio(tmp_path))
+    assert text == "Joni, Asadbekka salom."
+
+
+async def test_suspicious_chirp_rejects_bad_gemini_audit(
+    settings, tmp_path, monkeypatch
+):
+    """Do not route contact-list-like STT output when Gemini audit is garbage."""
+
+    monkeypatch.setattr(
+        "app.integrations.google_stt.transcribe_chirp_sync",
+        lambda s, b, hint_names=None: "M.B M.B,Guray,gulzora s,Dadam",
+    )
+    monkeypatch.setattr(
+        "app.integrations.gemini_client.get_gemini_client",
+        lambda _s: _fake_gemini(" ".join(["N. B. G."] * 80)),
+    )
+
+    s = _chirp_settings(settings)
+    text = await VoiceService(s).transcribe(_write_audio(tmp_path))
+    assert text == ""
+
+
+async def test_chirp_rejects_long_hint_leak_for_short_audio(
+    settings, tmp_path, monkeypatch
+):
+    """A short clip cannot be a long comma-separated contact/hint list."""
+
+    leaked = (
+        "Holis Holam,Ilhomaka Oglilari,Shohobiddin,Ulugbek,M S,"
+        "Shohjahon aka yuksalish,Buva,Dom Qoshni,unga salom deb yubor,"
+        "shu odamga salom deb yubor,Ihtiyor,yozishmalarni xulosa qil,"
+        "Shahmardon Shopir,ibrhmv_zz Ziyodullo,Emilbek,Farhot Domla,"
+        "gulzora s,Nasibullo,Nasibullo,Nurilloh Saltarow,Asya Almaty,"
+        "Mashhur Togam,English"
+    )
+    monkeypatch.setattr(
+        "app.integrations.google_stt.transcribe_chirp_sync",
+        lambda s, b, hint_names=None: leaked,
+    )
+    monkeypatch.setattr(
+        "app.integrations.gemini_client.get_gemini_client",
+        lambda _s: _fake_gemini(" ".join(["N. B. G."] * 80)),
+    )
+
+    s = _chirp_settings(settings)
+    text = await VoiceService(s).transcribe(_write_wav(tmp_path, seconds=2.5))
+    assert text == ""
+
+
+async def test_suspicious_chirp_verify_timeout_is_not_routed(
+    settings, tmp_path, monkeypatch
+):
+    """A stuck verifier must fail closed instead of sending to a wrong contact."""
+
+    monkeypatch.setattr(
+        "app.integrations.google_stt.transcribe_chirp_sync",
+        lambda s, b, hint_names=None: "M.B M.B,Guray,gulzora s,Dadam",
+    )
+    monkeypatch.setattr(
+        "app.integrations.gemini_client.get_gemini_client",
+        lambda _s: _slow_gemini(),
+    )
+
+    s = _chirp_settings(settings, stt_verify_timeout_seconds=0.01)
+    text = await VoiceService(s).transcribe(_write_audio(tmp_path))
+    assert text == ""
 
 
 async def test_chirp_empty_falls_back_to_gemini(settings, tmp_path, monkeypatch):

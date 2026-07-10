@@ -24,21 +24,43 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+# Built Gemini clients are reused across calls: a Vertex client reads + parses the
+# service-account JSON on construction, so rebuilding it per STT/answer/TTS call
+# adds needless latency. The SDK client is thread-safe and refreshes credentials
+# itself, so one instance per config is safe for the process's lifetime.
+_CLIENT_CACHE: dict[tuple[Any, ...], Any] = {}
+
+
 def get_gemini_client(settings: Settings) -> Any | None:
-    """Build a Gemini ``Client``, or ``None`` when unavailable/unconfigured."""
+    """Build (or reuse) a Gemini ``Client``, or ``None`` when unconfigured."""
+    key = (
+        bool(settings.gemini_use_vertex),
+        settings.gemini_api_key,
+        settings.google_cloud_project,
+        settings.google_cloud_location,
+        settings.google_application_credentials,
+    )
+    if key in _CLIENT_CACHE:
+        return _CLIENT_CACHE[key]
+
     try:
         from google import genai
     except ImportError:
         logger.warning("gemini_client.unavailable", reason="sdk_not_installed")
         return None
 
+    client: Any | None
     if settings.gemini_use_vertex:
-        return _vertex_client(genai, settings)
-    if settings.gemini_api_key:
-        return genai.Client(api_key=settings.gemini_api_key)
+        client = _vertex_client(genai, settings)
+    elif settings.gemini_api_key:
+        client = genai.Client(api_key=settings.gemini_api_key)
+    else:
+        logger.info("gemini_client.disabled", reason="no_api_key")
+        client = None
 
-    logger.info("gemini_client.disabled", reason="no_api_key")
-    return None
+    if client is not None:
+        _CLIENT_CACHE[key] = client
+    return client
 
 
 def _vertex_client(genai: Any, settings: Settings) -> Any | None:

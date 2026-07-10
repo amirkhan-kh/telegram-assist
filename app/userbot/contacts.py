@@ -37,6 +37,19 @@ def _display_name(user: object) -> str:
     return (getattr(user, "username", None) or "").strip()
 
 
+def _dialog_name(entity: object) -> str:
+    """Best display name for a private dialog entity."""
+    first = (getattr(entity, "first_name", None) or "").strip()
+    last = (getattr(entity, "last_name", None) or "").strip()
+    full = f"{first} {last}".strip()
+    if full:
+        return full
+    title = (getattr(entity, "title", None) or "").strip()
+    if title:
+        return title
+    return (getattr(entity, "username", None) or "").strip()
+
+
 async def sync_contacts(client: TelegramClient, registry: ServiceRegistry) -> int:
     """Mirror the owner's Telegram contacts into the DB. Returns rows upserted.
 
@@ -71,6 +84,48 @@ async def sync_contacts(client: TelegramClient, registry: ServiceRegistry) -> in
     except Exception as exc:  # noqa: BLE001 - contact sync must never crash startup
         logger.warning("userbot.contacts.sync.error", error=str(exc))
     logger.info("userbot.contacts.sync.done", count=upserted)
+    return upserted
+
+
+async def sync_private_dialogs(
+    client: TelegramClient, registry: ServiceRegistry, *, limit: int = 700
+) -> int:
+    """Mirror reachable ALL CHATS private profiles into ``people``.
+
+    Telegram contacts only cover the saved address book. The owner may still
+    have private chats with unsaved profiles; these are reachable by userbot and
+    should resolve by name for message/chat-history commands.
+    """
+    upserted = 0
+    try:
+        async with registry.session() as session:
+            async for dialog in client.iter_dialogs(limit=limit):
+                entity = getattr(dialog, "entity", None)
+                if entity is None:
+                    continue
+                if getattr(entity, "bot", False) or getattr(entity, "deleted", False):
+                    continue
+                user_id = getattr(entity, "id", None)
+                if user_id is None:
+                    continue
+                # Only private user dialogs. Channels/groups have titles and ids,
+                # but contact commands should not accidentally target them.
+                if not hasattr(entity, "first_name") and not hasattr(entity, "last_name"):
+                    continue
+                name = _dialog_name(entity)
+                if not name:
+                    continue
+                await person_repo.upsert_telegram_contact(
+                    session,
+                    telegram_user_id=int(user_id),
+                    display_name=name,
+                    username=getattr(entity, "username", None),
+                    phone=getattr(entity, "phone", None),
+                )
+                upserted += 1
+    except Exception as exc:  # noqa: BLE001 - best-effort sync
+        logger.warning("userbot.dialogs.sync.error", error=str(exc))
+    logger.info("userbot.dialogs.sync.done", count=upserted)
     return upserted
 
 

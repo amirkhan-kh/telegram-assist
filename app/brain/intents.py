@@ -267,3 +267,94 @@ class SaveToNotion(BaseModel):
 
     text: str
     title: str | None = None
+
+
+class GetWeather(BaseModel):
+    """Show weather for a city/date range."""
+
+    location: str | None = None
+    scope: Literal["today", "tomorrow", "week"] = "today"
+
+
+class JarvisBriefing(BaseModel):
+    """Give the owner a compact Jarvis-style plan/weather briefing."""
+
+    scope: Literal["today", "week"] = "today"
+
+
+class GetNews(BaseModel):
+    """Show the latest Uzbek-language world+local news headlines (titles linked)."""
+
+    limit: int = 10
+
+
+class SearchChatMedia(BaseModel):
+    """Find and send media from a Telegram private chat."""
+
+    contact_name: str
+    media_type: Literal["photo", "video", "document", "any"] = "photo"
+    direction: Literal["incoming", "outgoing", "both"] = "incoming"
+    limit: int = 5
+
+
+class GetChatMessages(BaseModel):
+    """Show recent Telegram messages from a private chat."""
+
+    contact_name: str
+    direction: Literal["incoming", "outgoing", "both"] = "incoming"
+    scope: Literal["recent", "today", "week"] = "recent"
+    limit: int = 1
+
+
+class SummarizeChat(BaseModel):
+    """Summarize recent Telegram messages with a contact."""
+
+    contact_name: str
+    scope: Literal["recent", "today", "week"] = "recent"
+    limit: int = 50
+
+
+class AnswerQuestion(BaseModel):
+    """Answer a general question or hold a natural conversation.
+
+    The conversational/knowledge fallback: anything that is NOT one of the
+    action intents above — general knowledge, facts, news, advice, opinions,
+    definitions, translations, calculations, or plain chit-chat. The assistant
+    replies in natural, voice-friendly Uzbek instead of falling back to
+    "Tushunmadim". ``needs_fresh_info`` marks questions whose answer changes
+    over time (news, prices, exchange rates, scores, "today/now" facts) so the
+    answer can be grounded with a live web search; evergreen facts leave it
+    ``False``.
+    """
+
+    query: str = Field(
+        description="The owner's question or topic, cleaned of filler words."
+    )
+    needs_fresh_info: bool = Field(
+        default=False,
+        description=(
+            "True when the answer depends on up-to-date/live info (news, prices, "
+            "exchange rates, weather elsewhere, current events); else False."
+        ),
+    )
+
+
+class SearchTelegramArchive(BaseModel):
+    """Search all visible Telegram private chats, groups, and channels."""
+
+    query: str = Field(
+        description=(
+            "What the owner is looking for: topic, visual description, voice "
+            "meaning, or message meaning."
+        )
+    )
+    chat_name: str | None = Field(
+        default=None,
+        description="Group/channel/private chat name if the owner named one.",
+    )
+    chat_types: Literal["all", "private", "groups", "channels"] = "all"
+    media_type: Literal[
+        "any", "text", "voice", "audio", "video", "photo", "document"
+    ] = "any"
+    scope: Literal["recent", "today", "week"] = "recent"
+    limit: int = 3

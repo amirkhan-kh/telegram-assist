@@ -77,25 +77,20 @@ class BriefingService:
 
     # ── public entry points ─────────────────────────────────────────────────
     async def run_morning(self) -> str | None:
-        """Build and deliver the morning plan with a confirmation gate.
+        """Build and deliver the morning plan — informational, no confirmation.
 
-        Delivering the plan raises the gate (``_MORNING_GATE_KEY``); the owner must
-        tap «✅ Tasdiqlash» before the bot will act on anything else that day.
+        The plan is sent as a plain post: no «✅ Tasdiqlash» button and no gate,
+        so the owner can act on the bot immediately.
         """
-        from app.bot.keyboards import morning_confirm_button
-
         now = utcnow()
         owner_id, today, overdue, events = await self._collect(now)
         if owner_id is None:
             return None
         emails = await self._fetch_emails()
         text = self._format_morning(now, today, overdue, events, emails)
-        await self.set_morning_pending(now)
         notifier = self.registry.notification_service
         if notifier is not None:
-            await notifier.notify_owner(
-                text, parse_mode="HTML", reply_markup=morning_confirm_button()
-            )
+            await notifier.notify_owner(text, parse_mode="HTML")
         logger.info("briefing.morning.delivered", today=len(today), overdue=len(overdue))
         return text
 
@@ -112,10 +107,13 @@ class BriefingService:
             await setting_repo.set_value(session, _MORNING_GATE_KEY, "")
 
     async def is_morning_pending(self) -> bool:
-        """True when a morning plan is awaiting the owner's confirmation."""
-        async with self.registry.session() as session:
-            value = await setting_repo.get_value(session, _MORNING_GATE_KEY)
-        return bool(value)
+        """Always False — the morning-plan confirmation gate is disabled.
+
+        The morning plan is now purely informational (no «✅ Tasdiqlash» button),
+        so nothing is ever blocked. Kept as a method so callers/tests stay stable;
+        any stale gate value left in storage is ignored.
+        """
+        return False
 
     async def run_evening(self) -> str | None:
         """Deliver the interactive end-of-day review (checklist of today's items)."""

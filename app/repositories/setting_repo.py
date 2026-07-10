@@ -28,3 +28,12 @@ async def set_value(session: AsyncSession, key: str, value: Any) -> Setting:
         row.value = value
     await session.flush()
     return row
+
+
+async def delete_value(session: AsyncSession, key: str) -> None:
+    """Delete a stored setting if it exists."""
+    result = await session.execute(select(Setting).where(Setting.key == key))
+    row = result.scalars().first()
+    if row is not None:
+        await session.delete(row)
+        await session.flush()

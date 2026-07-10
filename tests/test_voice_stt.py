@@ -82,6 +82,7 @@ async def test_transcribe_passes_contact_names_to_prompt(settings, tmp_path, mon
     # The transcription prompt is the last text part of the multimodal contents.
     prompt = captured["contents"][-1]
     assert "Asadbek" in prompt and "Dilnoza" in prompt
+    assert "shunga salom deb yubor" in prompt
     assert captured["model"] == s.gemini_stt_model
 
 

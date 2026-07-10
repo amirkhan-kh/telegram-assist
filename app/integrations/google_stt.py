@@ -30,6 +30,19 @@ logger = get_logger(__name__)
 # Cap the contact-name hint list so the adaptation payload stays bounded even
 # when the owner has a large synced phonebook.
 _HINT_MAX = 200
+_COMMAND_HINTS = [
+    "shunga salom deb yubor",
+    "shu odamga salom deb yubor",
+    "shu kontaktga salom deb yubor",
+    "unga salom deb yubor",
+    "salom deb xabar yubor",
+    "oxirgi xabarni yubor",
+    "oxirgi rasmni yubor",
+    "yozishmalarni xulosa qil",
+    "xabar yubor",
+    "ovozli xabar yubor",
+    "matnli xabar yubor",
+]
 
 
 def _resolve_project_and_creds(settings: Settings):
@@ -118,10 +131,12 @@ def _build_adaptation(cloud_speech, hint_names: list[str] | None):
     Chirp 2 supports plain word/phrase hints (no class tokens, no boost weights),
     so each contact name is added as a bare phrase value.
     """
-    names = [n.strip() for n in (hint_names or []) if n and n.strip()][:_HINT_MAX]
-    if not names:
+    names = [n.strip() for n in (hint_names or []) if n and n.strip()]
+    phrases_raw = _COMMAND_HINTS + names
+    phrases_raw = phrases_raw[:_HINT_MAX]
+    if not phrases_raw:
         return None
-    phrases = [cloud_speech.PhraseSet.Phrase(value=n) for n in names]
+    phrases = [cloud_speech.PhraseSet.Phrase(value=value) for value in phrases_raw]
     return cloud_speech.SpeechAdaptation(
         phrase_sets=[
             cloud_speech.SpeechAdaptation.AdaptationPhraseSet(

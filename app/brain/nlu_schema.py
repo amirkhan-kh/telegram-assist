@@ -22,12 +22,17 @@ from pydantic import BaseModel, Field
 from app.brain.intents import (
     AddFinance,
     AddImportantDate,
+    AnswerQuestion,
     AssignTaskWithFollowup,
     CancelItem,
     CreatePromise,
     CreateReminder,
     FindFreeSlots,
+    GetChatMessages,
     GetDigest,
+    GetNews,
+    GetWeather,
+    JarvisBriefing,
     ListAgenda,
     ListContacts,
     ListDecisions,
@@ -40,8 +45,11 @@ from app.brain.intents import (
     SaveToNotion,
     ScheduleMeeting,
     ScheduleMessage,
+    SearchChatMedia,
+    SearchTelegramArchive,
     SendMessage,
     ShowCalendar,
+    SummarizeChat,
 )
 
 # The intent name the model must choose. Keep these strings identical to the
@@ -69,6 +77,14 @@ IntentName = Literal[
     "list_emails",
     "save_to_notion",
     "show_calendar",
+    "get_weather",
+    "get_news",
+    "jarvis_briefing",
+    "get_chat_messages",
+    "search_chat_media",
+    "summarize_chat",
+    "search_telegram_archive",
+    "answer_question",
     "unknown",
 ]
 
@@ -111,3 +127,28 @@ class NLUResult(BaseModel):
     list_emails: ListEmails | None = None
     save_to_notion: SaveToNotion | None = None
     show_calendar: ShowCalendar | None = None
+    get_weather: GetWeather | None = None
+    get_news: GetNews | None = None
+    jarvis_briefing: JarvisBriefing | None = None
+    get_chat_messages: GetChatMessages | None = None
+    search_chat_media: SearchChatMedia | None = None
+    summarize_chat: SummarizeChat | None = None
+    search_telegram_archive: SearchTelegramArchive | None = None
+    answer_question: AnswerQuestion | None = None
+
+
+class NLUMultiResult(BaseModel):
+    """One or more ordered actions parsed from a single owner message.
+
+    A message may bundle several commands ("... ayt, hozir ogohlantir va bir
+    minutdan keyin yana ogohlantir"). Each becomes one :class:`NLUResult` in
+    ``actions``, in the order the owner said them; a single-command message
+    yields exactly one element. Typically 1–5 actions.
+    """
+
+    actions: list[NLUResult] = Field(
+        description=(
+            "Ordered list, one NLUResult per distinct command the owner gave "
+            "(usually 1, up to ~5). Preserve the spoken order."
+        )
+    )

@@ -23,10 +23,12 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from io import BytesIO
+from pathlib import Path
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
-from telegram import ReplyKeyboardMarkup, Update
+from telegram import InputFile, ReplyKeyboardMarkup, Update
 from telegram.constants import ChatAction
 from telegram.ext import ContextTypes
 
@@ -37,16 +39,17 @@ from app.brain.intents import (
     ListDecisions,
     ListFinance,
     ListImportantDates,
-    ShowCalendar,
     SendMessage,
+    ShowCalendar,
 )
 from app.brain.translit import normalize_name
 from app.logging_conf import get_logger
 from app.repositories import person_repo
 from app.services import audio_service
 from app.services.dispatcher import (
+    DispatchResult,
     clear_pending_compose,
-    clear_pending_outbound,
+    clear_pending_outbound_persisted,
     clear_pending_time,
     complete_outbound,
     complete_phone_name,
@@ -300,25 +303,45 @@ async def _handle_outbound_callback(registry: ServiceRegistry, query: object) ->
     mode_str = data.split(":", 1)[1] if ":" in data else "text"
     mode = SendMode.voice if mode_str == "voice" else SendMode.text
     await query.answer("⏳ Yuborilmoqda…")  # type: ignore[attr-defined]
-    result = await complete_outbound(
-        registry, registry.settings.owner_chat_id, mode
-    )
     message = query.message  # type: ignore[attr-defined]
     if message is None:
+        await complete_outbound(registry, registry.settings.owner_chat_id, mode)
+        return
+    prompt_text = getattr(message, "text", None) or getattr(message, "caption", None)
+    loading_msg, is_spinner = await _send_loading_indicator(message, "⏳ Yuborilmoqda…")
+    try:
+        result = await complete_outbound(
+            registry,
+            registry.settings.owner_chat_id,
+            mode,
+            prompt_text=prompt_text,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("bot.outbound_callback.failed")
+        await _safe_edit(loading_msg, _error_reply(exc))
         return
     # Replace the «Qanday yuboray?» prompt with the outcome (buttons removed).
+    result_text = _with_done_notice(result.text, result.reply_markup)
     try:
         await query.edit_message_text(  # type: ignore[attr-defined]
-            result.text,
+            result_text,
             parse_mode=result.parse_mode,
             reply_markup=result.reply_markup,
         )
+        await _safe_delete(loading_msg)
     except Exception:  # noqa: BLE001 — uneditable/unchanged: post a fresh reply
-        await message.reply_text(
-            result.text,
-            parse_mode=result.parse_mode,
-            reply_markup=result.reply_markup,
-        )
+        if is_spinner:
+            await _safe_delete(loading_msg)
+            await _safe_reply(
+                message,
+                result_text,
+                parse_mode=result.parse_mode,
+                reply_markup=result.reply_markup,
+            )
+        else:
+            await _safe_edit(
+                loading_msg, result_text, result.parse_mode, result.reply_markup
+            )
 
 
 async def _handle_savephone_callback(registry: ServiceRegistry, query: object) -> None:
@@ -883,6 +906,125 @@ async def _safe_edit(
             pass
 
 
+async def _safe_reply(
+    message: Message,
+    text: str,
+    parse_mode: str | None = None,
+    reply_markup: object | None = None,
+) -> None:
+    """Reply with text; on HTML/parse failure retry as plain text."""
+    try:
+        await message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+    except Exception:  # noqa: BLE001
+        try:
+            await message.reply_text(
+                re.sub(r"<[^>]+>", "", text), reply_markup=reply_markup
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+
+async def _safe_delete(message: Message) -> None:
+    """Delete a temporary message when Telegram allows it."""
+    try:
+        await message.delete()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+_SPEECH_STRIP_RE = re.compile(r"[*_#`>|]+")
+
+
+def _speech_text(text: str) -> str:
+    """Strip markup/bullets so a spoken answer reads cleanly through TTS."""
+    cleaned = _SPEECH_STRIP_RE.sub("", text or "")
+    cleaned = re.sub(r"(?m)^\s*[-•]\s*", "", cleaned)
+    return " ".join(cleaned.split()).strip()
+
+
+def _safe_unlink(path: str) -> None:
+    """Remove a temp file, ignoring errors (runs in a worker thread)."""
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+async def _speak_back(message: Message, voice: object, text: str) -> bool:
+    """Reply with a spoken voice note of ``text``; ``True`` when one was sent.
+
+    Used for conversational answers (the ``answer_question`` intent) when the
+    owner asked by voice — a voice question gets a voice answer, like a live
+    assistant. Returns ``False`` (so the caller can fall back to text) when there
+    is nothing to say or TTS is unavailable. Never raises.
+    """
+    try:
+        clean = _speech_text(text)
+        if not clean:
+            return False
+        path = await voice.tts_to_voice_note(clean)  # type: ignore[attr-defined]
+        if not path:
+            return False
+        try:
+            data = await asyncio.to_thread(Path(path).read_bytes)
+            await message.reply_voice(voice=InputFile(BytesIO(data), filename="javob.ogg"))
+            return True
+        finally:
+            await asyncio.to_thread(_safe_unlink, path)
+    except Exception as exc:  # noqa: BLE001 — voice is a bonus, never break the turn
+        logger.warning("bot.speak_back.failed", error=str(exc))
+    return False
+
+
+async def _send_loading_indicator(
+    message: Message, loading: str
+) -> tuple[Message, bool]:
+    """Show an editable hourglass loading message."""
+    return await message.reply_text(loading), False
+
+
+async def _replace_loading_with_text(
+    message: Message,
+    loading_indicator: tuple[Message, bool] | None,
+    text: str,
+) -> None:
+    """Use an existing loading indicator for a final plain-text response."""
+    if loading_indicator is None:
+        await message.reply_text(text)
+        return
+    placeholder, is_spinner = loading_indicator
+    if is_spinner:
+        await _safe_delete(placeholder)
+        await message.reply_text(text)
+    else:
+        await _safe_edit(placeholder, text)
+
+
+_DONE_NOTICE = "✅ Amal bajarildi."
+_NON_FINAL_REPLY_RE = re.compile(
+    r"(qanday|qaysi|tanlang|yozing|ayting|qaytadan|qaytaroq|topilmadi|"
+    r"aniqlay olmadim|bo['‘’ʻʼ`]?sh|xatolik|ulanishi topilmadi|mavjud emas|"
+    r"hozircha|iltimos|kerak|kerek|limiti|tushunmadim)",
+    re.IGNORECASE,
+)
+
+
+def _with_done_notice(text: str, reply_markup: object | None = None) -> str:
+    """Prefix completed actions, but do not label prompts/errors as complete."""
+    clean = (text or "").strip()
+    if not clean or clean.startswith(_DONE_NOTICE):
+        return text
+    if reply_markup is not None and (
+        "Qanday yuboray" in clean
+        or "tanlang" in clean.lower()
+        or "Raqamini tanlang" in clean
+    ):
+        return text
+    if _NON_FINAL_REPLY_RE.search(clean):
+        return text
+    return f"{_DONE_NOTICE}\n\n{text}"
+
+
 async def _rate_limit_on(message: Message, exc: Exception, retry=None) -> None:
     """Turn ``message`` into a live countdown to when the AI limit reopens.
 
@@ -925,7 +1067,10 @@ async def _rate_limit_on(message: Message, exc: Exception, retry=None) -> None:
             await _safe_edit(message, _GENERIC_ERROR)
             return
         await _safe_edit(
-            message, result.text, result.parse_mode, result.reply_markup
+            message,
+            _with_done_notice(result.text, result.reply_markup),
+            result.parse_mode,
+            result.reply_markup,
         )
 
     task = asyncio.create_task(_tick())
@@ -933,35 +1078,125 @@ async def _rate_limit_on(message: Message, exc: Exception, retry=None) -> None:
     task.add_done_callback(_BG_TASKS.discard)
 
 
-async def _respond(message: Message, run, *, loading: str = "⏳ Bajarilmoqda…") -> None:
+async def _respond(
+    message: Message,
+    run,
+    *,
+    loading: str = "⏳ Bajarilmoqda…",
+    loading_indicator: tuple[Message, bool] | None = None,
+    speak_voice: object | None = None,
+) -> None:
     """Show a loading placeholder, run ``run()``, then edit it with the result.
 
     Every command gets a tidy loading "skeleton"; rate-limit errors turn the
     same message into a live countdown, other errors into a clear note. ``run``
     is a zero-arg coroutine factory returning a ``DispatchResult`` (or ``None``).
     """
-    placeholder = await message.reply_text(loading)
+    if loading_indicator is None:
+        placeholder, is_spinner = await _send_loading_indicator(message, loading)
+    else:
+        placeholder, is_spinner = loading_indicator
+        if not is_spinner:
+            await _safe_edit(placeholder, loading)
     try:
         result = await asyncio.wait_for(run(), timeout=_RESPOND_TIMEOUT)
     except TimeoutError:
         logger.warning("bot.respond.timeout")
-        await _safe_edit(
-            placeholder,
-            "⏳ Biroz sekin ketdi (AI javob bermadi). Qayta urinib ko'ring.",
-        )
+        if is_spinner:
+            await _safe_delete(placeholder)
+            await _safe_reply(
+                message,
+                "⏳ Biroz sekin ketdi (AI javob bermadi). Qayta urinib ko'ring.",
+            )
+        else:
+            await _safe_edit(
+                placeholder,
+                "⏳ Biroz sekin ketdi (AI javob bermadi). Qayta urinib ko'ring.",
+            )
         return
     except Exception as exc:  # noqa: BLE001 — a failure must never crash the loop
         logger.exception("bot.respond.failed")
         if _is_rate_limit(exc):
-            await _rate_limit_on(placeholder, exc, retry=run)
+            if is_spinner:
+                await _safe_delete(placeholder)
+                countdown = await message.reply_text("⏳ Limit tekshirilmoqda…")
+                await _rate_limit_on(countdown, exc, retry=run)
+            else:
+                await _rate_limit_on(placeholder, exc, retry=run)
         else:
-            await _safe_edit(placeholder, _error_reply(exc))
+            if is_spinner:
+                await _safe_delete(placeholder)
+                await _safe_reply(message, _error_reply(exc))
+            else:
+                await _safe_edit(placeholder, _error_reply(exc))
         return
     if result is None:
-        await _safe_edit(placeholder, _GENERIC_ERROR)
+        if is_spinner:
+            await _safe_delete(placeholder)
+            await _safe_reply(message, _GENERIC_ERROR)
+        else:
+            await _safe_edit(placeholder, _GENERIC_ERROR)
         return
-    await _safe_edit(
-        placeholder, result.text, result.parse_mode, result.reply_markup
+    speak = getattr(result, "speak", False)
+
+    # Voice question to the ASSISTANT (answer_question) -> reply with VOICE ONLY,
+    # like a real voice assistant: no text bubble, no "done" label. If TTS is
+    # unavailable we fall through and send the text so the answer is never lost.
+    # Agent/action replies (speak=False) and text-typed turns are unaffected.
+    if speak_voice is not None and speak:
+        if await _speak_back(message, speak_voice, result.text):
+            await _safe_delete(placeholder)
+            return
+
+    # Conversational answers are not "actions" -> no "✅ Amal bajarildi" label.
+    display = result.text if speak else _with_done_notice(result.text, result.reply_markup)
+    if is_spinner:
+        await _safe_delete(placeholder)
+        await _safe_reply(message, display, result.parse_mode, result.reply_markup)
+    else:
+        await _safe_edit(placeholder, display, result.parse_mode, result.reply_markup)
+
+
+def _force_chain_delivery(routed: object) -> None:
+    """In a multi-action chain, default a send to TEXT so it doesn't pause the
+    whole chain on the «🎙 Ovozli | 📝 Matn» prompt. An explicit channel stays."""
+    from app.brain.intents import DeliveryMode
+
+    if getattr(routed, "name", "") not in ("send_message", "schedule_message"):
+        return
+    params = getattr(routed, "params", None)
+    delivery = getattr(params, "delivery", None)
+    if params is not None and getattr(delivery, "value", delivery) == "ask":
+        params.delivery = DeliveryMode.text
+
+
+async def _dispatch_routed_many(registry: ServiceRegistry, routed_items: list) -> object:
+    """Dispatch ordered intents from one utterance; stop if a prompt needs input."""
+    multi = len(routed_items) > 1
+    results = []
+    for routed in routed_items:
+        if multi:
+            # Don't let one send's delivery prompt strand the rest of the chain.
+            _force_chain_delivery(routed)
+        result = await dispatch(registry, routed, now=datetime.now(UTC))
+        results.append(result)
+        needs_input = result.reply_markup is not None and _NON_FINAL_REPLY_RE.search(
+            result.text or ""
+        )
+        if needs_input:
+            if len(results) == 1:
+                return result
+            text = "\n\n".join(r.text for r in results if r.text)
+            return DispatchResult(
+                text,
+                parse_mode=result.parse_mode,
+                reply_markup=result.reply_markup,
+            )
+    if len(results) == 1:
+        return results[0]
+    return DispatchResult(
+        "Ketma-ket bajarilgan amallar:\n\n"
+        + "\n\n".join(f"{idx}. {r.text}" for idx, r in enumerate(results, start=1)),
     )
 
 
@@ -1071,10 +1306,13 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     await message.chat.send_action(ChatAction.TYPING)
+    loading_indicator = await _send_loading_indicator(
+        message, "⏳ Ovoz tahlil qilinmoqda…"
+    )
     text = await _transcribe_message(registry, message, media)
     if not text:
         logger.info("bot.voice.transcribed_empty")
-        await message.reply_text(_STT_FAILED)
+        await _replace_loading_with_text(message, loading_indicator, _STT_FAILED)
         return
 
     # Log the transcription so voice issues are debuggable from the server logs
@@ -1082,7 +1320,9 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("bot.voice.transcribed", chars=len(text), text=text)
     # Echo what we heard so the owner can catch a mis-hearing, then act on it.
     await message.reply_text(f"🎙 «{text}»")
-    await _route_and_reply(registry, message, text)
+    await _route_and_reply(
+        registry, message, text, loading_indicator=loading_indicator, voice_reply=True
+    )
 
 
 async def on_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1107,6 +1347,45 @@ async def on_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await message.reply_text(
         f"📞 {name} ({phone}) qabul qilindi. Nima yuboray?"
     )
+
+
+async def on_gif(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Remove a white background from an uploaded GIF/animation."""
+    registry = _registry(context)
+    message = update.effective_message
+    if message is None:
+        return
+    media = message.animation or message.document
+    if media is None:
+        return
+    if await _morning_gate_blocks(registry, message):
+        return
+
+    await message.chat.send_action(ChatAction.UPLOAD_DOCUMENT)
+    try:
+        from app.services.gif_service import remove_white_background
+
+        file_name = getattr(media, "file_name", None) or "animation.gif"
+        suffix = os.path.splitext(file_name)[1] or ".gif"
+        tg_file = await media.get_file()  # type: ignore[attr-defined]
+        with tempfile.TemporaryDirectory() as tmp:
+            src = os.path.join(tmp, f"input{suffix}")
+            await tg_file.download_to_drive(src)
+            out = await asyncio.to_thread(
+                remove_white_background,
+                src,
+                out_dir=tmp,
+            )
+            data = await asyncio.to_thread(Path(out).read_bytes)
+            await message.reply_document(
+                document=InputFile(BytesIO(data), filename="spinner_transparent.gif"),
+                caption="✅ Oq fon o'chirildi.",
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("bot.gif.background_remove_failed", error=str(exc))
+        await message.reply_text(
+            "GIF fonini o'chirib bo'lmadi. GIF/animation faylni qayta yuboring."
+        )
 
 
 async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1359,8 +1638,21 @@ def _parse_selection(text: str) -> int | None:
 
 
 # ── shared pipeline ───────────────────────────────────────────────────────────
+def _voice_for_speech(registry: ServiceRegistry) -> object | None:
+    """The voice service when it can synthesize TTS, else ``None``."""
+    voice = registry.voice_service
+    if voice is not None and voice.available():
+        return voice
+    return None
+
+
 async def _route_and_reply(
-    registry: ServiceRegistry, message: Message, text: str
+    registry: ServiceRegistry,
+    message: Message,
+    text: str,
+    *,
+    loading_indicator: tuple[Message, bool] | None = None,
+    voice_reply: bool = False,
 ) -> None:
     """Route ``text`` to an action and reply with a loading→result flow.
 
@@ -1376,6 +1668,7 @@ async def _route_and_reply(
             message,
             lambda: complete_phone_name(registry, owner_key, text),
             loading="⏳ Kontakt saqlanmoqda…",
+            loading_indicator=loading_indicator,
         )
         return
 
@@ -1389,6 +1682,7 @@ async def _route_and_reply(
                 message,
                 lambda: resume_time_text(registry, text, now=datetime.now(UTC)),
                 loading="⏳ Belgilanmoqda…",
+                loading_indicator=loading_indicator,
             )
             return
 
@@ -1402,6 +1696,7 @@ async def _route_and_reply(
                 message,
                 lambda: dispatch_compose(registry, text, now=datetime.now(UTC)),
                 loading="⏳ Tayyorlanmoqda…",
+                loading_indicator=loading_indicator,
             )
             return
 
@@ -1413,6 +1708,7 @@ async def _route_and_reply(
                 message,
                 lambda: resume_choice(registry, selection, now=datetime.now(UTC)),
                 loading="⏳ Tanlanmoqda…",
+                loading_indicator=loading_indicator,
             )
             return
         # A non-number reply mid-pick is either a corrected contact name (reuse
@@ -1434,11 +1730,16 @@ async def _route_and_reply(
                 registry, routed, raw_text=text, now=now
             )
 
-        await _respond(message, _pending_or_new, loading="⏳ Bajarilmoqda…")
+        await _respond(
+            message,
+            _pending_or_new,
+            loading="⏳ Bajarilmoqda…",
+            loading_indicator=loading_indicator,
+        )
         return
 
     # No pending pick: a fresh message supersedes any waiting voice/text choice.
-    clear_pending_outbound(owner_key)
+    await clear_pending_outbound_persisted(registry, owner_key)
 
     menu = _menu_intent(text)
     if menu is not None:
@@ -1446,6 +1747,7 @@ async def _route_and_reply(
             message,
             lambda: dispatch(registry, menu, now=datetime.now(UTC)),
             loading=_MENU_LOADING.get(text, "⏳ Bajarilmoqda…"),
+            loading_indicator=loading_indicator,
         )
         return
 
@@ -1467,12 +1769,13 @@ async def _route_and_reply(
                     now=datetime.now(UTC),
                 ),
                 loading="⏳ Tayyorlanmoqda…",
+                loading_indicator=loading_indicator,
             )
             return
         elif _shared_phone_refers(text):
             nlu = registry.nlu_service
             if nlu is None or not nlu.available():
-                await message.reply_text(_NO_NLU)
+                await _replace_loading_with_text(message, loading_indicator, _NO_NLU)
                 return
 
             async def _shared_route() -> object:
@@ -1482,16 +1785,21 @@ async def _route_and_reply(
                 ).isoformat()
                 routed = await nlu.route(text, now_iso=now_iso)
                 if routed.name in ("send_message", "schedule_message"):
-                    setattr(routed.params, "recipient_name", shared.phone)
+                    routed.params.recipient_name = shared.phone
                     _SHARED_PHONE.pop(owner_key, None)
                 return await dispatch(registry, routed, now=now)
 
-            await _respond(message, _shared_route, loading="⏳ Bajarilmoqda…")
+            await _respond(
+                message,
+                _shared_route,
+                loading="⏳ Bajarilmoqda…",
+                loading_indicator=loading_indicator,
+            )
             return
 
     nlu = registry.nlu_service
     if nlu is None or not nlu.available():
-        await message.reply_text(_NO_NLU)
+        await _replace_loading_with_text(message, loading_indicator, _NO_NLU)
         return
 
     async def _route() -> object:
@@ -1499,10 +1807,16 @@ async def _route_and_reply(
         now_iso = now.astimezone(
             ZoneInfo(registry.settings.user_timezone)
         ).isoformat()
-        routed = await nlu.route(text, now_iso=now_iso)
-        return await dispatch(registry, routed, now=now)
+        routed_items = await nlu.route_many(text, now_iso=now_iso)
+        return await _dispatch_routed_many(registry, routed_items)
 
-    await _respond(message, _route, loading="⏳ Bajarilmoqda…")
+    await _respond(
+        message,
+        _route,
+        loading="⏳ Bajarilmoqda…",
+        loading_indicator=loading_indicator,
+        speak_voice=_voice_for_speech(registry) if voice_reply else None,
+    )
 
 
 async def _transcribe_message(
