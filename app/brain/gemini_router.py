@@ -59,9 +59,14 @@ class GeminiIntentRouter:
         settings = get_settings()
         self.client = client if client is not None else get_gemini_client(settings)
         self.model = model or settings.gemini_nlu_model
-        # Vertex honours native ``response_schema``; the free API-key path can't
-        # (schema too large) and is guided by ``_schema_hint`` in the prompt.
-        self.use_response_schema = bool(settings.gemini_use_vertex)
+        # Native ``response_schema`` (constrained decoding over the whole intent
+        # envelope) is robust but SLOW and only accepted by full ``flash`` on
+        # Vertex. ``flash-lite`` — used for low-latency routing — can't take the
+        # large schema, so it (and the free API-key path) is guided by
+        # ``_schema_hint`` in the prompt instead, which is markedly faster.
+        self.use_response_schema = bool(settings.gemini_use_vertex) and (
+            "lite" not in (self.model or "")
+        )
 
     async def _generate_with_retry(self, *, contents: str, config: Any) -> Any:
         """Call Gemini, retrying transient failures (5xx high-demand/internal,
