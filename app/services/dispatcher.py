@@ -1432,12 +1432,14 @@ async def dispatch(
     params = routed.params
 
     if name == "unknown" or params is None:
-        return DispatchResult("Tushunmadim, takrorlay olasizmi?")
+        return DispatchResult("Buni to'liq tushunolmadim. Biroz boshqacharoq ayting — nima qilishimni "
+            "xohlaysiz? (masalan «eslat», «xabar yubor», «kontaktlarimni tahlil qil»)")
 
     handler = _HANDLERS.get(name)
     if handler is None:
         logger.warning("dispatch.no_handler", intent=name)
-        return DispatchResult("Tushunmadim, takrorlay olasizmi?")
+        return DispatchResult("Buni to'liq tushunolmadim. Biroz boshqacharoq ayting — nima qilishimni "
+            "xohlaysiz? (masalan «eslat», «xabar yubor», «kontaktlarimni tahlil qil»)")
 
     try:
         return await handler(registry, params, now)
@@ -1451,7 +1453,8 @@ async def dispatch(
     except Exception:  # noqa: BLE001 - never crash the bot loop
         logger.exception("dispatch.failed", intent=name)
         return DispatchResult(
-            "Xatolik yuz berdi. Iltimos, biroz o'zgartirib qaytadan urinib ko'ring."
+            "Kechirasiz, buni bajarishda kutilmagan xatolik bo'ldi. Bir oz o'tib "
+            "qayta urinib ko'ring; agar takrorlansa, biroz boshqacharoq ifodalang."
         )
 
 

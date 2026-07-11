@@ -123,7 +123,8 @@ async def test_self_promise_confirms(registry):
 
 async def test_unknown_intent_is_graceful(registry):
     result = await dispatch(registry, RoutedIntent("unknown", None, {}), now=_now())
-    assert "Tushunmadim" in result.text
+    # Graceful, human, non-empty — invites the owner to rephrase (no dead-end).
+    assert "tushunolmadim" in result.text.lower()
 
 
 async def test_ambiguous_time_asks_day_then_clock_then_creates(registry):

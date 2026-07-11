@@ -64,7 +64,9 @@ class GeminiIntentRouter:
         self.use_response_schema = bool(settings.gemini_use_vertex)
 
     async def _generate_with_retry(self, *, contents: str, config: Any) -> Any:
-        """Call Gemini, retrying transient 5xx (high-demand/internal) failures."""
+        """Call Gemini, retrying transient failures (5xx high-demand/internal,
+        timeouts, and network blips like a dropped TLS connect to Vertex)."""
+        import httpx
         from google.genai import errors as genai_errors
 
         delay = _RETRY_BASE_DELAY
@@ -76,7 +78,7 @@ class GeminiIntentRouter:
                     ),
                     timeout=_CALL_TIMEOUT,
                 )
-            except (genai_errors.ServerError, TimeoutError) as exc:
+            except (genai_errors.ServerError, TimeoutError, httpx.TransportError) as exc:
                 if attempt == _RETRY_ATTEMPTS - 1:
                     raise
                 logger.warning(

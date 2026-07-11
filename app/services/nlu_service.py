@@ -445,7 +445,17 @@ class NluService:
                 params=direct.params.model_dump() if direct.params is not None else None,
             )
             return direct
-        return await self.router.route(utterance, now_iso=now_iso)
+        routed = await self.router.route(utterance, now_iso=now_iso)
+        # No dead-ends: anything the router can't map to an action becomes a
+        # conversational answer, so the assistant always replies helpfully (or
+        # asks to clarify) like a human instead of a terse "Tushunmadim".
+        if routed.name == "unknown":
+            from app.brain.intents import AnswerQuestion
+
+            params = AnswerQuestion(query=utterance)
+            logger.info("nlu.unknown_to_answer", utterance=utterance[:80])
+            return RoutedIntent("answer_question", params, params.model_dump())
+        return routed
 
     async def route_many(self, utterance: str, *, now_iso: str) -> list[RoutedIntent]:
         """Route one utterance into one or more ordered actions.
