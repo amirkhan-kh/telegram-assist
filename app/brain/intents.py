@@ -213,6 +213,21 @@ class AnalyzeActivity(BaseModel):
     )
 
 
+class AnalyzeChats(BaseModel):
+    """An analytical / open question ACROSS the owner's Telegram conversations —
+    who they message most, most active chats, activity over time, incoming vs
+    outgoing counts.
+
+    Examples: "kim bilan ko'p yozishaman", "eng faol chatlarim qaysi", "oxirgi
+    hafta kim menga ko'p yozdi", "eng ko'p kim menga yozgan". NOT reading or
+    searching ONE specific chat (that is get_chat_messages / summarize_chat /
+    search_telegram_archive)."""
+
+    query: str = Field(
+        description="The owner's full conversation-analytics question, verbatim."
+    )
+
+
 class ListFinance(BaseModel):
     """List outstanding debts/credits with a computed total per currency.
 

@@ -23,6 +23,7 @@ from app.brain.intents import (
     AddFinance,
     AddImportantDate,
     AnalyzeActivity,
+    AnalyzeChats,
     AnalyzeContacts,
     AnswerQuestion,
     AssignTaskWithFollowup,
@@ -70,6 +71,7 @@ IntentName = Literal[
     "list_contacts",
     "analyze_contacts",
     "analyze_activity",
+    "analyze_chats",
     "list_finance",
     "list_agenda",
     "list_meetings",
@@ -122,6 +124,7 @@ class NLUResult(BaseModel):
     list_contacts: ListContacts | None = None
     analyze_contacts: AnalyzeContacts | None = None
     analyze_activity: AnalyzeActivity | None = None
+    analyze_chats: AnalyzeChats | None = None
     list_finance: ListFinance | None = None
     list_agenda: ListAgenda | None = None
     list_meetings: ListMeetings | None = None

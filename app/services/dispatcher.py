@@ -2185,6 +2185,18 @@ async def _analyze_activity(
     return DispatchResult(text)
 
 
+async def _analyze_chats(
+    registry: ServiceRegistry, params: Any, now: datetime
+) -> DispatchResult:
+    """Answer an analytical question ACROSS the owner's Telegram conversations
+    (who they message most, most active chats, activity over time). Plain text."""
+    from app.services.chat_analysis_service import analyze_chats
+
+    query = (getattr(params, "query", "") or "").strip()
+    text = await analyze_chats(registry, query=query, now=now)
+    return DispatchResult(text)
+
+
 async def _list_finance(
     registry: ServiceRegistry, params: Any, now: datetime
 ) -> DispatchResult:
@@ -3295,6 +3307,7 @@ _HANDLERS = {
     "list_contacts": _list_contacts,
     "analyze_contacts": _analyze_contacts,
     "analyze_activity": _analyze_activity,
+    "analyze_chats": _analyze_chats,
     "list_finance": _list_finance,
     "list_agenda": _list_agenda,
     "list_reminders": _list_reminders,

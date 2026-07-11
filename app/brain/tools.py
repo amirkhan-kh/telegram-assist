@@ -574,6 +574,31 @@ def _analyze_activity_tool() -> dict[str, Any]:
     }
 
 
+def _analyze_chats_tool() -> dict[str, Any]:
+    return {
+        "name": "analyze_chats",
+        "description": (
+            "Egasining Telegram suhbatlari ustidan tahliliy/ochiq savolga javob "
+            "berish: kim bilan ko'p yozishadi, eng faol chatlar, kim ko'p yozgan, "
+            "vaqt bo'yicha faollik. 'kim bilan ko'p yozishaman', 'eng faol "
+            "chatlarim', 'oxirgi hafta kim menga ko'p yozdi'. Bitta aniq chatni "
+            "o'qish/qidirish EMAS (u get_chat_messages/summarize_chat/"
+            "search_telegram_archive). / Analytical question across all chats."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Egasining to'liq savoli / the full question.",
+                },
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    }
+
+
 def _list_finance_tool() -> dict[str, Any]:
     return {
         "name": "list_finance",
@@ -1140,6 +1165,7 @@ def build_tools() -> list[dict[str, Any]]:
         _list_contacts_tool(),
         _analyze_contacts_tool(),
         _analyze_activity_tool(),
+        _analyze_chats_tool(),
         _list_finance_tool(),
         _list_agenda_tool(),
         _list_meetings_tool(),

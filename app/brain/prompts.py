@@ -197,6 +197,12 @@ the group/channel/chat. Set media_type="video" for video descriptions, \
 "voice" for ovozli xabar, "audio" for audio, "photo" for images, "text" for \
 plain posts, else "any". Set chat_types="groups"/"channels"/"private" only if \
 the owner explicitly narrows it; otherwise "all".
+- ANALYTICAL questions ACROSS conversations (not ONE chat) — ranking, counting, \
+comparing who/how-much: "kim bilan ko'p yozishaman", "eng faol chatlarim qaysi", \
+"oxirgi hafta kim menga ko'p yozdi", "eng ko'p kim menga yozgan", "nechta guruhdaman" \
+-> analyze_chats (copy the whole question into query). Use get_chat_messages / \
+summarize_chat / search_telegram_archive for ONE specific chat; use analyze_chats to \
+reason or rank ACROSS all chats.
 
 EMAIL & NOTION:
 - "emaillarim", "muhim xatlar", "pochtamni tekshir", "o'qilmagan xatlar" -> \
@@ -307,6 +313,8 @@ NOT list_contacts.
 analyze_contacts (query="bir xil ismli kontaktlar nechta, hammasini ro'yxat qil").
 - "Shu oyda nechta uchrashuvim bor va eng katta qarzim kimda" -> analyze_activity \
 (query="shu oyda nechta uchrashuvim bor va eng katta qarzim kimda"), NOT list_meetings.
+- "Kim bilan eng ko'p yozishaman" -> analyze_chats (query="kim bilan eng ko'p \
+yozishaman"), NOT summarize_chat/get_chat_messages.
 """
 
 # Framing for the Gemini router when ONE message may carry SEVERAL commands.
