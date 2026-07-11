@@ -1274,6 +1274,64 @@ def _local(dt: datetime, registry: ServiceRegistry) -> str:
     return to_local_str(dt, registry.settings.user_timezone)
 
 
+_USERNAME_RE = re.compile(r"^@?[A-Za-z][A-Za-z0-9_]{4,31}$")
+
+
+def _is_explicit_username(text: str) -> bool:
+    """True when ``text`` is clearly a Telegram @username (not a plain name).
+
+    An explicit ``@`` marks intent; without it we only accept a token that has an
+    underscore (personal names practically never do), so a bare name like
+    "Akmal" is never resolved to a random stranger who happens to own @akmal.
+    """
+    t = (text or "").strip()
+    if not t or " " in t:
+        return False
+    if t.startswith("@"):
+        return bool(_USERNAME_RE.match(t))
+    return "_" in t and bool(_USERNAME_RE.match(t))
+
+
+async def _resolve_username_recipient(
+    registry: ServiceRegistry, name: str
+) -> ContactMatch | None:
+    """Resolve a public @username GLOBALLY via the userbot and import it.
+
+    Lets the owner message anyone by username — not just saved contacts. The
+    userbot (the owner's own account) resolves the handle to a real user, which
+    is then imported by ``telegram_user_id`` so the normal send flow (which needs
+    ``chat_id``) delivers to it. Returns ``None`` for an unknown/invalid handle,
+    a bot, or a non-user (channel/group)."""
+    if registry.userbot is None:
+        return None
+    handle = name.strip().lstrip("@")
+    try:
+        entity = await registry.userbot.get_entity(handle)
+    except Exception as exc:  # noqa: BLE001 — UsernameNotOccupied / Invalid / flood
+        logger.info("dispatch.username.not_found", username=handle, error=str(exc)[:80])
+        return None
+    uid = getattr(entity, "id", None)
+    # A personal message target must be a real user (not a channel/group/bot).
+    if uid is None or getattr(entity, "broadcast", False) or getattr(entity, "megagroup", False):
+        return None
+    if getattr(entity, "bot", False):
+        return None
+    first = getattr(entity, "first_name", "") or ""
+    last = getattr(entity, "last_name", "") or ""
+    display = f"{first} {last}".strip() or (getattr(entity, "username", None) or handle)
+    async with registry.session() as session:
+        person = await person_repo.upsert_telegram_contact(
+            session,
+            telegram_user_id=uid,
+            display_name=display,
+            username=getattr(entity, "username", None),
+            phone=getattr(entity, "phone", None),
+        )
+        match = _match_from_person(person)
+    logger.info("dispatch.username.resolved", username=handle, user_id=uid, name=display)
+    return match
+
+
 async def _resolve_recipient(
     registry: ServiceRegistry, name: str
 ) -> ContactMatch | Disambiguation | None:
@@ -1291,6 +1349,15 @@ async def _resolve_recipient(
         resolved = await resolve_contact(session, name)
     if resolved is not None:
         return resolved
+
+    # Not a saved contact — resolve a public @username GLOBALLY via the userbot and
+    # import it, so the owner can message anyone by username (e.g. @AbubakirKhakimov),
+    # not only saved contacts. Only for explicit @/underscore handles (see helper).
+    if _is_explicit_username(name):
+        username_match = await _resolve_username_recipient(registry, name)
+        if username_match is not None:
+            return username_match
+
     if registry.userbot is None:
         return None
 
