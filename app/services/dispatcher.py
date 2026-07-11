@@ -1051,9 +1051,19 @@ async def _resolve_or_pend(
         logger.info("dispatch.contact.not_found", intent=intent_name, name=name)
         if not required:
             return None
+        # Pause the action awaiting the right recipient, so the owner's NEXT reply
+        # (a name, @username or phone) resumes THIS send instead of being taken as
+        # a brand-new command (see resume_with_correction / _recipient_reply).
+        _PENDING[registry.settings.owner_chat_id] = _PendingChoice(
+            intent_name=intent_name,
+            params=params,
+            field=field,
+            candidate_ids=[],
+            candidate_labels=[],
+        )
         return DispatchResult(
-            f"\"{name}\" kontaktlarda topilmadi. "
-            "Telefoningizdagi kontakt nomini aniqroq ayting."
+            f"\"{name}\" kontaktlarda topilmadi. Kimga yuboray — ismini, "
+            "@username yoki telefon raqamini yozing."
         )
 
     # Several matched (e.g. two "Akmal"s, or a Latin + a Cyrillic spelling):
@@ -1166,6 +1176,34 @@ def _recipient_of(routed: RoutedIntent) -> str | None:
     return None
 
 
+_EMOJI_RE = re.compile(r"[\U0001F000-\U0001FAFF☀-➿⬀-⯿]")
+
+
+def _recipient_reply(raw_text: str, routed: RoutedIntent) -> str | None:
+    """When the paused action asked "who?", is this reply the recipient answer?
+
+    A recipient-shaped reply — an ``@username``, a phone number, or a lone
+    username/name token — is the ANSWER to the prompt, not a fresh command. This
+    is what lets "elnox_uz" (typed after the bot asked whom to message) resume the
+    send, instead of the NLU's tentative reading of that lone token (e.g. as an
+    archive search) hijacking the turn. Returns the recipient text, or ``None``
+    when the reply is clearly its own command (a menu tap, a multi-word request).
+    """
+    text = (raw_text or "").strip()
+    if not text or len(text) > 64 or _EMOJI_RE.search(text):
+        return None
+    if text.startswith("@") or _looks_like_phone(text):
+        return text
+    # A short token that is username-like (has "_") OR that the NLU could only
+    # read as "search for this exact word" / could not understand — i.e. not a
+    # real command — is the name/username answering "who?".
+    if len(text.split()) <= 2 and (
+        "_" in text or routed.name in ("search_telegram_archive", "unknown")
+    ):
+        return text
+    return None
+
+
 async def resume_with_correction(
     registry: ServiceRegistry,
     routed: RoutedIntent,
@@ -1194,19 +1232,21 @@ async def resume_with_correction(
         clear_pending(owner_key)
         return await dispatch(registry, routed, now=now)
 
-    # A genuinely different command (no recipient, e.g. add_finance, a reminder)
-    # supersedes the pending pick.
-    if pending is None or (routed.name != "unknown" and new_name is None):
+    # A genuinely different command supersedes the pending pick — UNLESS the reply
+    # is the recipient the prompt asked for (the model named one, or it is a bare
+    # @username / phone / name token). A recipient answer resumes the paused
+    # action even when the NLU tentatively routed that lone token elsewhere
+    # (e.g. "elnox_uz" mis-read as an archive search).
+    recipient = new_name or _recipient_reply(raw_text, routed)
+    if pending is None or recipient is None:
         clear_pending(owner_key)
         return await dispatch(registry, routed, now=now)
 
-    # Otherwise treat the reply as the corrected contact for the paused action:
-    # a routed recipient if the model found one, else the raw text (a bare name).
-    name = new_name or raw_text.strip()
+    # Treat the reply as the corrected recipient for the paused action and resume.
     clear_pending(owner_key)
-    setattr(pending.params, pending.field, name)
+    setattr(pending.params, pending.field, recipient)
     logger.info(
-        "dispatch.resume_with_correction", intent=pending.intent_name, name=name
+        "dispatch.resume_with_correction", intent=pending.intent_name, name=recipient
     )
     corrected = RoutedIntent(pending.intent_name, pending.params, {})
     return await dispatch(registry, corrected, now=now)
