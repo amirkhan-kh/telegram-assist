@@ -102,6 +102,29 @@ async def test_pronoun_followup_resolves_to_last_contact(registry):
     assert "aniqlay olmadim" not in second.text
 
 
+async def test_stale_last_contact_confirms_by_name(registry):
+    """After a gap, a vague follow-up CONFIRMS by naming the last recipient — it
+    neither silently sends to a possibly-stale target nor asks a bare "who?"."""
+    from datetime import timedelta
+
+    from app.services import dispatcher as D
+
+    owner = registry.settings.owner_chat_id
+    async with registry.session() as session:
+        await person_repo.upsert_telegram_contact(
+            session, telegram_user_id=778, display_name="Dilshod", username="dilshod_uz"
+        )
+    await _send_voice(registry, "Dilshod", "salom")  # establishes the memory
+    # Age it past the confirm gap.
+    D._LAST_CONTACT[owner].at = datetime.now(UTC) - timedelta(minutes=20)
+
+    result = await _send_voice(registry, "unga", "yana salom")
+    assert "Dilshod" in result.text
+    assert "yuboraymi" in result.text  # a confirmation, not a silent send
+    assert "yuborildi" not in result.text
+    assert result.reply_markup is not None  # the confirm/pick button
+
+
 async def test_meeting_followup_targets_last_contact(registry):
     async with registry.session() as session:
         owner = await person_repo.get_owner(session)
@@ -153,7 +176,7 @@ async def test_new_name_overrides_remembered_contact(registry):
 async def test_pronoun_without_memory_asks_for_name(registry):
     # No contact named yet this session -> a pronoun cannot be resolved.
     result = await _send_voice(registry, "unga", "salom")
-    assert "aniqlay olmadim" in result.text
+    assert "Kimga yuboray" in result.text
 
 
 async def test_referent_phrase_asks_for_name_not_garbage(registry):
@@ -167,6 +190,6 @@ async def test_referent_phrase_asks_for_name_not_garbage(registry):
             session, telegram_user_id=901, display_name="Shuxrat aka"
         )
     result = await _send_voice(registry, "Shu raqam egasiga", "salom")
-    assert "aniqlay olmadim" in result.text
+    assert "Kimga yuboray" in result.text
     assert "Shuxrat" not in result.text
     assert "kontakt topildi" not in result.text

@@ -23,7 +23,7 @@ import contextvars
 import html
 import re
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
@@ -876,9 +876,15 @@ class _LastContact:
 
     person_id: int
     display_name: str
+    at: datetime | None = None
 
 
 _LAST_CONTACT: dict[int, _LastContact] = {}
+
+# A vague follow-up ("unga yubor", or a message with no recipient) reuses the last
+# contact. Within this gap it resumes silently (smooth); after it, the bot CONFIRMS
+# by naming them — never a bare "who?" nor a silent send to a possibly-stale target.
+_LAST_CONFIRM_GAP = timedelta(minutes=10)
 
 
 def clear_last_contact(owner_key: int) -> None:
@@ -889,7 +895,9 @@ def clear_last_contact(owner_key: int) -> None:
 def _remember_contact(owner_key: int, match: ContactMatch) -> None:
     """Record ``match`` as the contact a vague follow-up should resolve to."""
     _LAST_CONTACT[owner_key] = _LastContact(
-        person_id=match.person_id, display_name=match.display_name
+        person_id=match.person_id,
+        display_name=match.display_name,
+        at=datetime.now(UTC),
     )
 
 
@@ -1033,14 +1041,32 @@ async def _resolve_or_pend(
                 person = await person_repo.get_by_id(session, last.person_id)
             if person is not None:
                 match = _match_from_person(person)
-                _remember_contact(owner_key, match)
-                # Replace the pronoun with the real name so downstream
-                # confirmations ("... ga yuborildi") read naturally.
-                setattr(params, field, match.display_name)
-                return match
-        # Referred back to "them" but no contact has been named yet this session.
+                gap = None if last.at is None else datetime.now(UTC) - last.at
+                # Fresh follow-up -> resume silently (smooth). After a gap -> CONFIRM
+                # by naming the last recipient (never a bare "who?" nor a silent send
+                # to a possibly-stale target): reuse the single-candidate pick, so a
+                # tap confirms and typing a different name/@username redirects.
+                if gap is not None and gap < _LAST_CONFIRM_GAP:
+                    _remember_contact(owner_key, match)
+                    setattr(params, field, match.display_name)
+                    return match
+                _PENDING[owner_key] = _PendingChoice(
+                    intent_name=intent_name,
+                    params=params,
+                    field=field,
+                    candidate_ids=[match.person_id],
+                    candidate_labels=[match.display_name],
+                )
+                handle = f" (@{match.username})" if match.username else ""
+                return DispatchResult(
+                    f"Oxirgi marta «{match.display_name}»{handle} bilan yozgan "
+                    "edingiz — shunga yuboraymi? Tasdiqlash uchun pastdagi tugmani "
+                    "bosing, yoki boshqa ism/@username yozing.",
+                    reply_markup=contact_pick_keyboard([match.person_id]),
+                )
+        # No last contact at all -> we genuinely must ask who.
         return DispatchResult(
-            "Kimga ekanini aniqlay olmadim — iltimos, kontakt nomini ayting."
+            "Kimga yuboray? Ism, @username yoki telefon raqamini yozing."
         )
 
     resolved = await _resolve_recipient(registry, name)
