@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from app.brain.intents import (
     AddFinance,
     AddImportantDate,
+    AnalyzeContacts,
     AnswerQuestion,
     AssignTaskWithFollowup,
     CancelItem,
@@ -66,6 +67,7 @@ IntentName = Literal[
     "get_digest",
     "cancel_item",
     "list_contacts",
+    "analyze_contacts",
     "list_finance",
     "list_agenda",
     "list_meetings",
@@ -116,6 +118,7 @@ class NLUResult(BaseModel):
     get_digest: GetDigest | None = None
     cancel_item: CancelItem | None = None
     list_contacts: ListContacts | None = None
+    analyze_contacts: AnalyzeContacts | None = None
     list_finance: ListFinance | None = None
     list_agenda: ListAgenda | None = None
     list_meetings: ListMeetings | None = None

@@ -184,6 +184,21 @@ class ListContacts(BaseModel):
     limit: int = 40
 
 
+class AnalyzeContacts(BaseModel):
+    """An analytical / open question about the owner's WHOLE contact list.
+
+    Covers duplicates, counts, groupings, statistics, or "all contacts named X" —
+    anything that reasons OVER the address book rather than looking up one person
+    to message. Examples: "eng ko'p bir xil ismli kontaktlar qaysi", "bir xil
+    ismli kontaktlar nechta, ro'yxatini tuz", "Ali ismli barcha kontaktlarim",
+    "usernameyi yo'q kontaktlar nechta". NOT a simple lookup to message someone
+    (that stays list_contacts)."""
+
+    query: str = Field(
+        description="The owner's full contacts question/task, copied verbatim."
+    )
+
+
 class ListFinance(BaseModel):
     """List outstanding debts/credits with a computed total per currency.
 

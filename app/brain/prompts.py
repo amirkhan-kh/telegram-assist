@@ -223,8 +223,19 @@ If the request is to cancel/remove an existing item, use cancel_item and put \
 the owner's description of the item into selector.
 
 LISTING / VIEWING (these only READ, they never create anything):
-- "kontaktlarim", "kontaktlarim ro'yxati", "kontaktlarimni chiqar" -> \
-list_contacts (put any name fragment into query, else null).
+- CONTACTS — two different intents, choose carefully:
+  * Simple "show my contacts" or a name lookup to then message someone -> \
+list_contacts ("kontaktlarim", "kontaktlarimni chiqar", "Ali ismli kontaktim" -> \
+put the name fragment into query, else null).
+  * ANY ANALYTICAL or open question ABOUT the contact list as a whole -> \
+analyze_contacts (copy the WHOLE question into query). Use this whenever the owner \
+asks to count, compare, group, deduplicate, or reason over contacts — even long, \
+messy voice phrasings. Signals: "nechta", "eng ko'p", "bir xil ismli", \
+"takrorlan(uvchi)", "qaysi(lar)", "ro'yxatini tuz", "hammasini chiqar", "guruhla", \
+"tahlil qil", "... ismli barcha kontaktlarim", "usernameyi/raqami yo'q kontaktlar". \
+NEVER route these to list_contacts (it would search for a contact literally NAMED \
+the phrase and fail). When unsure between the two for a contacts QUESTION, prefer \
+analyze_contacts.
 - "kim menga qarzdor", "mendan qarzi borlar", "qarzlarim ro'yxati", "men kimga \
 qarzdorman" -> list_finance with the right direction (they_owe_me / i_owe_them \
 / all).
@@ -283,6 +294,11 @@ qancha uzoqlikda", needs_fresh_info=false — evergreen fact).
 (query="uxlashdan oldin kitob o'qish foydasi/maslahat", needs_fresh_info=false).
 - "salom, qalaysan" -> answer_question (query="salom, qalaysan", \
 needs_fresh_info=false — chit-chat, NOT unknown).
+- "Kontaktlarim ichida eng ko'p bir xil ismli qaysi, ularni ko'rsat" -> \
+analyze_contacts (query="eng ko'p bir xil ismli kontaktlar qaysi, ularni ko'rsat"), \
+NOT list_contacts.
+- "Bir xil ismli kontaktlar nechta, hammasini ro'yxat qilib chiqar" -> \
+analyze_contacts (query="bir xil ismli kontaktlar nechta, hammasini ro'yxat qil").
 """
 
 # Framing for the Gemini router when ONE message may carry SEVERAL commands.

@@ -523,6 +523,32 @@ def _list_contacts_tool() -> dict[str, Any]:
     }
 
 
+def _analyze_contacts_tool() -> dict[str, Any]:
+    return {
+        "name": "analyze_contacts",
+        "description": (
+            "Egasining BUTUN kontaktlar ro'yxati ustidan tahliliy/ochiq savolga "
+            "javob berish: takrorlanuvchi (bir xil) ismlar, nechta, eng ko'p, "
+            "guruhlash, statistika yoki 'falon ismli barcha kontaktlarim'. "
+            "'eng ko'p bir xil ismli kontaktlar', 'bir xil ismlilar nechta, "
+            "ro'yxatini tuz', 'Ali ismli barcha kontaktlarim'. Bu bitta odamга "
+            "xabar yozish uchun qidiruv EMAS (u list_contacts). / Analytical "
+            "question over the whole address book (dedupe, counts, grouping)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Egasining kontaktlar haqidagi to'liq savoli / the full question.",
+                },
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    }
+
+
 def _list_finance_tool() -> dict[str, Any]:
     return {
         "name": "list_finance",
@@ -1087,6 +1113,7 @@ def build_tools() -> list[dict[str, Any]]:
         _get_digest_tool(),
         _cancel_item_tool(),
         _list_contacts_tool(),
+        _analyze_contacts_tool(),
         _list_finance_tool(),
         _list_agenda_tool(),
         _list_meetings_tool(),

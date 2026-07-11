@@ -2158,6 +2158,21 @@ async def _list_contacts(
     return DispatchResult(text, parse_mode="HTML")
 
 
+async def _analyze_contacts(
+    registry: ServiceRegistry, params: Any, now: datetime
+) -> DispatchResult:
+    """Answer an analytical question over the owner's WHOLE contact list.
+
+    Duplicates, counts, groupings, "all named X" — anything ``list_contacts``
+    (a single-name lookup) can't. Plain text so lists/names stay readable.
+    """
+    from app.services.contact_analysis_service import analyze_contacts
+
+    query = (getattr(params, "query", "") or "").strip()
+    text = await analyze_contacts(registry, query=query)
+    return DispatchResult(text)
+
+
 async def _list_finance(
     registry: ServiceRegistry, params: Any, now: datetime
 ) -> DispatchResult:
@@ -3266,6 +3281,7 @@ _HANDLERS = {
     "find_free_slots": _find_free_slots,
     "get_digest": _get_digest,
     "list_contacts": _list_contacts,
+    "analyze_contacts": _analyze_contacts,
     "list_finance": _list_finance,
     "list_agenda": _list_agenda,
     "list_reminders": _list_reminders,
