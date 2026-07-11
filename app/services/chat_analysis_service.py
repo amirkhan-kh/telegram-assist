@@ -46,7 +46,24 @@ _SYSTEM = (
 )
 
 
-async def analyze_chats(registry: ServiceRegistry, *, query: str, now: datetime) -> str:
+def _history_block(history: list[tuple[str, str]] | None) -> str:
+    """Recent conversation turns as context so follow-ups continue naturally."""
+    if not history:
+        return ""
+    lines = [
+        f"{'Egasi' if role == 'user' else 'Sen'}: {text}"
+        for role, text in history[-8:]
+    ]
+    return "AVVALGI SUHBAT (kontekst — 'ular', 'u', 'yana' kabi ergashuvchi savollarga shu asosda javob ber):\n" + "\n".join(lines) + "\n\n"
+
+
+async def analyze_chats(
+    registry: ServiceRegistry,
+    *,
+    query: str,
+    now: datetime,
+    history: list[tuple[str, str]] | None = None,
+) -> str:
     """Answer ``query`` over the owner's indexed conversations (never raises)."""
     out_sum = func.sum(case((M.out.is_(True), 1), else_=0))
     async with registry.session() as session:
@@ -117,7 +134,10 @@ async def analyze_chats(registry: ServiceRegistry, *, query: str, now: datetime)
         response = await asyncio.wait_for(
             client.aio.models.generate_content(
                 model=registry.settings.gemini_nlu_model,
-                contents=f"SUHBAT STATISTIKASI:\n{context}\n\nEGASINING SAVOLI: {query}",
+                contents=(
+                    _history_block(history)
+                    + f"SUHBAT STATISTIKASI:\n{context}\n\nEGASINING SAVOLI: {query}"
+                ),
                 config=types.GenerateContentConfig(
                     system_instruction=_SYSTEM, temperature=0.2
                 ),

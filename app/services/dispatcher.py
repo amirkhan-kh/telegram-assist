@@ -2171,8 +2171,11 @@ async def _analyze_contacts(
     """
     from app.services.contact_analysis_service import analyze_contacts
 
+    owner_key = registry.settings.owner_chat_id
     query = (getattr(params, "query", "") or "").strip()
-    text = await analyze_contacts(registry, query=query)
+    history = _conv_history(owner_key, now)
+    text = await analyze_contacts(registry, query=query, history=history)
+    _conv_remember(owner_key, now, query, text)
     return DispatchResult(text)
 
 
@@ -2183,8 +2186,11 @@ async def _analyze_activity(
     meetings, debts, important dates and decisions. Plain, readable text."""
     from app.services.activity_analysis_service import analyze_activity
 
+    owner_key = registry.settings.owner_chat_id
     query = (getattr(params, "query", "") or "").strip()
-    text = await analyze_activity(registry, query=query, now=now)
+    history = _conv_history(owner_key, now)
+    text = await analyze_activity(registry, query=query, now=now, history=history)
+    _conv_remember(owner_key, now, query, text)
     return DispatchResult(text)
 
 
@@ -2195,8 +2201,11 @@ async def _analyze_chats(
     (who they message most, most active chats, activity over time). Plain text."""
     from app.services.chat_analysis_service import analyze_chats
 
+    owner_key = registry.settings.owner_chat_id
     query = (getattr(params, "query", "") or "").strip()
-    text = await analyze_chats(registry, query=query, now=now)
+    history = _conv_history(owner_key, now)
+    text = await analyze_chats(registry, query=query, now=now, history=history)
+    _conv_remember(owner_key, now, query, text)
     return DispatchResult(text)
 
 

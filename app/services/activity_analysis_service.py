@@ -56,8 +56,23 @@ _SYSTEM = (
 )
 
 
+def _history_block(history: list[tuple[str, str]] | None) -> str:
+    """Recent conversation turns as context so follow-ups continue naturally."""
+    if not history:
+        return ""
+    lines = [
+        f"{'Egasi' if role == 'user' else 'Sen'}: {text}"
+        for role, text in history[-8:]
+    ]
+    return "AVVALGI SUHBAT (kontekst — ergashuvchi savollarga shu asosda javob ber):\n" + "\n".join(lines) + "\n\n"
+
+
 async def analyze_activity(
-    registry: ServiceRegistry, *, query: str, now: datetime
+    registry: ServiceRegistry,
+    *,
+    query: str,
+    now: datetime,
+    history: list[tuple[str, str]] | None = None,
 ) -> str:
     """Answer ``query`` over the owner's activity snapshot (never raises)."""
     from app.services.dispatcher import dispatch
@@ -93,8 +108,9 @@ async def analyze_activity(
             client.aio.models.generate_content(
                 model=registry.settings.gemini_nlu_model,
                 contents=(
-                    f"JORIY HOLAT:\n{snapshot}\n\n"
-                    f"EGASINING SAVOLI: {query or 'Ishlarimni umumiy tahlil qilib ber.'}"
+                    _history_block(history)
+                    + f"JORIY HOLAT:\n{snapshot}\n\n"
+                    + f"EGASINING SAVOLI: {query or 'Ishlarimni umumiy tahlil qilib ber.'}"
                 ),
                 config=types.GenerateContentConfig(
                     system_instruction=_SYSTEM, temperature=0.2

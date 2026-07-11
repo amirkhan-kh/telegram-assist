@@ -83,7 +83,23 @@ def _build_stats(people: list) -> tuple[str, list[str]]:
     return stats, dup_lines
 
 
-async def analyze_contacts(registry: ServiceRegistry, *, query: str) -> str:
+def _history_block(history: list[tuple[str, str]] | None) -> str:
+    """Recent conversation turns as context so follow-ups continue naturally."""
+    if not history:
+        return ""
+    lines = [
+        f"{'Egasi' if role == 'user' else 'Sen'}: {text}"
+        for role, text in history[-8:]
+    ]
+    return "AVVALGI SUHBAT (kontekst — 'ular', 'u', 'yana' kabi ergashuvchi savollarga shu asosda javob ber):\n" + "\n".join(lines) + "\n\n"
+
+
+async def analyze_contacts(
+    registry: ServiceRegistry,
+    *,
+    query: str,
+    history: list[tuple[str, str]] | None = None,
+) -> str:
     """Answer ``query`` about the owner's whole contact list (never raises)."""
     async with registry.session() as session:
         people = await person_repo.list_all(session)
@@ -113,8 +129,9 @@ async def analyze_contacts(registry: ServiceRegistry, *, query: str) -> str:
     trailer = "" if len(people) <= _MAX_LIST else f"\n(ro'yxat {_MAX_LIST} ta bilan cheklandi)"
 
     contents = (
-        f"ANIQ STATISTIKA:\n{stats}\n\n"
-        "KONTAKTLAR (nom | @username | telefon):\n"
+        _history_block(history)
+        + f"ANIQ STATISTIKA:\n{stats}\n\n"
+        + "KONTAKTLAR (nom | @username | telefon):\n"
         + "\n".join(rows)
         + trailer
         + f"\n\nEGASINING SAVOLI: {query or 'Kontaktlarim haqida umumiy tahlil ber.'}"
