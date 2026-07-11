@@ -2173,6 +2173,18 @@ async def _analyze_contacts(
     return DispatchResult(text)
 
 
+async def _analyze_activity(
+    registry: ServiceRegistry, params: Any, now: datetime
+) -> DispatchResult:
+    """Answer an analytical question ACROSS the owner's reminders, tasks,
+    meetings, debts, important dates and decisions. Plain, readable text."""
+    from app.services.activity_analysis_service import analyze_activity
+
+    query = (getattr(params, "query", "") or "").strip()
+    text = await analyze_activity(registry, query=query, now=now)
+    return DispatchResult(text)
+
+
 async def _list_finance(
     registry: ServiceRegistry, params: Any, now: datetime
 ) -> DispatchResult:
@@ -3282,6 +3294,7 @@ _HANDLERS = {
     "get_digest": _get_digest,
     "list_contacts": _list_contacts,
     "analyze_contacts": _analyze_contacts,
+    "analyze_activity": _analyze_activity,
     "list_finance": _list_finance,
     "list_agenda": _list_agenda,
     "list_reminders": _list_reminders,

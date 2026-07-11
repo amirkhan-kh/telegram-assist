@@ -549,6 +549,31 @@ def _analyze_contacts_tool() -> dict[str, Any]:
     }
 
 
+def _analyze_activity_tool() -> dict[str, Any]:
+    return {
+        "name": "analyze_activity",
+        "description": (
+            "Egasining eslatma, vazifa, uchrashuv, qarz, muhim sana va qarorlari "
+            "ustidan tahliliy/ochiq savolga javob berish: sanash, taqqoslash, "
+            "'eng ...', 'shu oyda/hafta nechta', 'eng katta qarzim kimda', "
+            "'bajarilmagan vazifalarim', 'ishlarimni tahlil qil'. Oddiy bitta sohani "
+            "ko'rsatish EMAS (u list_*). / Analytical question across the owner's "
+            "reminders, tasks, meetings, debts, dates and decisions."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Egasining to'liq savoli / the full question.",
+                },
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    }
+
+
 def _list_finance_tool() -> dict[str, Any]:
     return {
         "name": "list_finance",
@@ -1114,6 +1139,7 @@ def build_tools() -> list[dict[str, Any]]:
         _cancel_item_tool(),
         _list_contacts_tool(),
         _analyze_contacts_tool(),
+        _analyze_activity_tool(),
         _list_finance_tool(),
         _list_agenda_tool(),
         _list_meetings_tool(),

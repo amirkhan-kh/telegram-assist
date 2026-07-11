@@ -244,6 +244,12 @@ qarzdorman" -> list_finance with the right direction (they_owe_me / i_owe_them \
 - "eslatmalarim", "eslatmalar ro'yxati", "qanaqa eslatmalarim bor" -> \
 list_reminders.
 - "meetinglarim", "uchrashuvlarim", "meetlarim" -> list_meetings.
+- ANALYTICAL questions ACROSS reminders/tasks/meetings/debts/dates/decisions — \
+counting, comparing, ranking, "eng ...", "shu oyda/hafta nechta", "eng katta qarzim \
+kimda", "bajarilmagan vazifalarim qaysi", "ishlarimni/rejalarimni tahlil qil" -> \
+analyze_activity (copy the whole question into query). The plain list_* intents just \
+DUMP one domain; use analyze_activity whenever the owner asks to reason, count or \
+compare across their plans, tasks, debts, dates or decisions.
 
 Be decisive: choose the single best intent and fill every field. Keep extracted \
 names short (just the person's name as the owner said it).
@@ -299,6 +305,8 @@ analyze_contacts (query="eng ko'p bir xil ismli kontaktlar qaysi, ularni ko'rsat
 NOT list_contacts.
 - "Bir xil ismli kontaktlar nechta, hammasini ro'yxat qilib chiqar" -> \
 analyze_contacts (query="bir xil ismli kontaktlar nechta, hammasini ro'yxat qil").
+- "Shu oyda nechta uchrashuvim bor va eng katta qarzim kimda" -> analyze_activity \
+(query="shu oyda nechta uchrashuvim bor va eng katta qarzim kimda"), NOT list_meetings.
 """
 
 # Framing for the Gemini router when ONE message may carry SEVERAL commands.

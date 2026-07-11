@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from app.brain.intents import (
     AddFinance,
     AddImportantDate,
+    AnalyzeActivity,
     AnalyzeContacts,
     AnswerQuestion,
     AssignTaskWithFollowup,
@@ -72,6 +73,7 @@ INTENT_MODELS: dict[str, type[BaseModel]] = {
     "cancel_item": CancelItem,
     "list_contacts": ListContacts,
     "analyze_contacts": AnalyzeContacts,
+    "analyze_activity": AnalyzeActivity,
     "list_finance": ListFinance,
     "list_agenda": ListAgenda,
     "list_meetings": ListMeetings,

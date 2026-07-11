@@ -199,6 +199,20 @@ class AnalyzeContacts(BaseModel):
     )
 
 
+class AnalyzeActivity(BaseModel):
+    """An analytical / open question over the owner's personal-productivity data —
+    reminders, tasks/promises, meetings, debts, important dates and decisions.
+
+    Examples: "shu oyda nechta uchrashuvim bor", "eng katta qarzim kimda",
+    "bajarilmagan vazifalarim qaysi", "bu hafta nimalar ko'p", "rejalarimni
+    umumiy tahlil qil". NOT a plain single-domain list
+    (list_agenda / list_reminders / list_meetings / list_finance …)."""
+
+    query: str = Field(
+        description="The owner's full planning/finance question, copied verbatim."
+    )
+
+
 class ListFinance(BaseModel):
     """List outstanding debts/credits with a computed total per currency.
 
