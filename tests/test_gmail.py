@@ -5,7 +5,12 @@ from __future__ import annotations
 from app.brain.intent_router import RoutedIntent
 from app.brain.intents import ListEmails
 from app.db.base import utcnow
-from app.integrations.google.gmail import EmailSummary, _clean_sender, _clean_snippet
+from app.integrations.google.gmail import (
+    EmailSummary,
+    _clean_sender,
+    _clean_snippet,
+    _is_bulk,
+)
 from app.services.dispatcher import dispatch
 
 
@@ -21,6 +26,16 @@ def test_clean_snippet_truncates():
     out = _clean_snippet(long, limit=20)
     assert len(out) == 20 and out.endswith("…")
     assert _clean_snippet("  a   b  ") == "a b"
+
+
+def test_is_bulk_detects_marketing():
+    # Newsletters/product blasts carry a List-Unsubscribe or List-Id header.
+    assert _is_bulk({"list-unsubscribe": "<https://x/unsub>"}, []) is True
+    assert _is_bulk({"list-id": "<news.notion.so>"}, []) is True
+    assert _is_bulk({"precedence": "bulk"}, []) is True
+    assert _is_bulk({}, ["CATEGORY_PROMOTIONS"]) is True
+    # A plain personal email is not bulk.
+    assert _is_bulk({"from": "ali@mail.com"}, ["INBOX", "UNREAD"]) is False
 
 
 class _FakeGmail:

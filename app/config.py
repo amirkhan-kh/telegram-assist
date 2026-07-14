@@ -140,6 +140,14 @@ class Settings(BaseSettings):
     evening_review_hour: int = 21
     # How many days ahead the morning plan surfaces upcoming important dates.
     important_date_lookahead_days: int = 7
+    # Morning plan: surface unread Telegram chats (contacts + groups + channels,
+    # each with its unread count) read live from the userbot. Off when the
+    # userbot session is not set. Per-category caps keep noisy channels in check.
+    telegram_unread_in_briefing: bool = True
+    telegram_unread_scan_limit: int = 200
+    telegram_unread_max_dms: int = 6
+    telegram_unread_max_groups: int = 4
+    telegram_unread_max_channels: int = 4
     # Use the LLM to merge same-topic posts across channels (different wording).
     digest_semantic_dedup: bool = True
     # On startup, ingest recent history so the digest is not empty after a restart.

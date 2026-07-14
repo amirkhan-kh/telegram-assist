@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import html
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
@@ -87,7 +87,8 @@ class BriefingService:
         if owner_id is None:
             return None
         emails = await self._fetch_emails()
-        text = self._format_morning(now, today, overdue, events, emails)
+        telegram = await self._fetch_telegram_unread()
+        text = self._format_morning(now, today, overdue, events, emails, telegram)
         notifier = self.registry.notification_service
         if notifier is not None:
             await notifier.notify_owner(text, parse_mode="HTML")
@@ -179,6 +180,11 @@ class BriefingService:
         """Gather today's items, overdue items and upcoming important dates."""
         tz = self._tz
         today_local = now.astimezone(tz).date()
+        # "Kechagi bajarilmaganlar" means *yesterday's* leftovers only — items
+        # older than one day fall off the plan (a meeting from 2 days ago must
+        # not linger). Anything still relevant stays in the DB; it just isn't
+        # surfaced in the morning post.
+        yesterday_local = today_local - timedelta(days=1)
 
         async with self.registry.session() as session:
             owner = await person_repo.get_owner(session)
@@ -224,7 +230,7 @@ class BriefingService:
             d = as_utc(it.when).astimezone(tz).date()
             if d == today_local:
                 today.append(it)
-            elif d < today_local and not it.recurring:
+            elif d == yesterday_local and not it.recurring:
                 overdue.append(it)
         today.sort(key=lambda i: as_utc(i.when) if i.when else as_utc(now))
         overdue.sort(key=lambda i: as_utc(i.when) if i.when else as_utc(now))
@@ -262,6 +268,18 @@ class BriefingService:
             logger.warning("briefing.gmail.failed", error=str(exc)[:120])
             return []
 
+    async def _fetch_telegram_unread(self):
+        """Best-effort unread Telegram summary (None when the userbot is off)."""
+        if not self.registry.settings.telegram_unread_in_briefing:
+            return None
+        try:
+            from app.services.telegram_unread_service import fetch_unread_summary
+
+            return await fetch_unread_summary(self.registry)
+        except Exception as exc:  # noqa: BLE001 - telegram is optional in the plan
+            logger.warning("briefing.telegram.failed", error=str(exc)[:120])
+            return None
+
     def _format_morning(
         self,
         now: datetime,
@@ -269,6 +287,7 @@ class BriefingService:
         overdue: list[_Item],
         events: list,
         emails: list | None = None,
+        telegram: object | None = None,
     ) -> str:
         local = now.astimezone(self._tz)
         header = (
@@ -306,6 +325,8 @@ class BriefingService:
             )
         if emails:
             blocks.append(self._block("📧", "Muhim xatlar", self._email_lines(emails)))
+        if telegram is not None and not getattr(telegram, "is_empty", True):
+            blocks.append(self._telegram_block(telegram))
 
         priorities = self._priorities(today, overdue)
         if priorities:
@@ -315,7 +336,15 @@ class BriefingService:
             ]
             blocks.append("⭐ <b>Bugungi 3 ta prioritet</b>\n" + "\n".join(lines))
 
-        if not meetings and not tasks and not overdue and not events and not emails:
+        telegram_empty = telegram is None or getattr(telegram, "is_empty", True)
+        if (
+            not meetings
+            and not tasks
+            and not overdue
+            and not events
+            and not emails
+            and telegram_empty
+        ):
             blocks.append(
                 "✨ Bugun reja bo'sh. Dam oling yoki yangi reja qo'shing — "
                 "menga shunchaki yozing."
@@ -391,6 +420,29 @@ class BriefingService:
             subject = html.escape(getattr(e, "subject", ""), quote=False)
             lines.append(f"{mark}<b>{sender}</b> — {subject}")
         return lines
+
+    @staticmethod
+    def _telegram_block(summary: object) -> str:
+        """Render the unread-Telegram digest: DMs, then groups, then channels."""
+        lines: list[str] = []
+        for c in getattr(summary, "dms", []):
+            name = html.escape(c.name, quote=False)
+            lines.append(f"👤 <b>{name}</b> ({c.count})")
+        for c in getattr(summary, "groups", []):
+            name = html.escape(c.name, quote=False)
+            lines.append(f"👥 {name} ({c.count})")
+        for c in getattr(summary, "channels", []):
+            name = html.escape(c.name, quote=False)
+            lines.append(f"📢 {name} ({c.count})")
+        hidden = getattr(summary, "hidden_chats", 0)
+        if hidden:
+            lines.append(f"<i>… va yana {hidden} ta chat</i>")
+        total = getattr(summary, "total_unread", 0)
+        body = "\n".join(lines)
+        return (
+            f"💬 <b>Telegram — {total} o'qilmagan xabar</b>\n"
+            f"<blockquote>{body}</blockquote>"
+        )
 
     @staticmethod
     def _block(emoji: str, label: str, items: list[str]) -> str:

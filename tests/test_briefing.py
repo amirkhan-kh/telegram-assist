@@ -41,6 +41,41 @@ async def _reminder_due_today(registry):
     )
 
 
+async def _scheduled_meeting(registry, *, days_ago: int, title: str):
+    """Create a scheduled meeting whose start is ``days_ago`` days in the past."""
+    from app.repositories import meeting_repo
+
+    tz = ZoneInfo(registry.settings.user_timezone)
+    start_local = (datetime.now(tz) - timedelta(days=days_ago)).replace(
+        hour=20, minute=0, second=0, microsecond=0
+    )
+    start = start_local.astimezone(UTC)
+    async with registry.session() as session:
+        owner = await person_repo.get_owner(session)
+        await meeting_repo.create(
+            session,
+            owner_id=owner.id,
+            title=title,
+            start_at=start,
+            end_at=start + timedelta(hours=1),
+        )
+
+
+async def test_morning_overdue_is_yesterday_only(registry):
+    """'Kechagi bajarilmaganlar' shows yesterday's leftovers, not older ones."""
+    notifier = _CapturingNotifier()
+    registry.notification_service = notifier
+    await _scheduled_meeting(registry, days_ago=1, title="Kechagi miting")
+    await _scheduled_meeting(registry, days_ago=2, title="Eski miting")
+
+    text = await registry.briefing_service.run_morning()
+    assert text is not None
+    # Yesterday's meeting surfaces (in overdue + priorities); the 2-day-old one
+    # is dropped entirely — it must not appear anywhere in the plan.
+    assert "Kechagi miting" in text
+    assert "Eski miting" not in text
+
+
 async def test_morning_briefing_lists_today(registry):
     notifier = _CapturingNotifier()
     registry.notification_service = notifier
